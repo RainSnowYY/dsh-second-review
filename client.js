@@ -1693,7 +1693,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6, flexWrap: 'wrap' } },
             React.createElement('span', { style: { fontWeight: 600 } }, '二次评审'),
-            React.createElement('span', { style: { opacity: 0.5, fontSize: FS.min } }, 'v' + (ver || '1.3.2')),
+            React.createElement('span', { style: { opacity: 0.5, fontSize: FS.min } }, 'v' + (ver || '1.3.4')),
             React.createElement('span', { style: { opacity: 0.45, fontSize: FS.min } }, '看不到版本号 = 页面还是旧的，重开一次 DSH 窗口'),
           ),
           React.createElement(

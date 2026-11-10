@@ -89,7 +89,7 @@ const MAX_CHARS = 60000
 const LEGACY_BUDGET_MS = 45000
 
 /* 版本号（0.7.0 起）：/config 会带出去，设置页「关于」直接显示，不用去翻 package.json */
-const VERSION = '1.3.2'
+const VERSION = '1.3.4'
 
 /* ---------------- 配置（副模型 + 自动评审 + 主刀） ---------------- */
 

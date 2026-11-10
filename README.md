@@ -3,7 +3,7 @@
 > Independent second-opinion review for DeepSeek Harness.
 > 主模型负责执行，副模型负责复核；结论以卡片形式附在原回复下方。
 
-![version](https://img.shields.io/badge/version-1.3.2-blue)
+![version](https://img.shields.io/badge/version-1.3.4-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![dsh](https://img.shields.io/badge/DSH-0.2.2--rc.1%20verified-informational)
@@ -18,7 +18,7 @@
 - 它只挑会造成损失的毛病——删错、丢数据、白花钱、返工、被误导、方案根本不成立。措辞、标点、礼貌这类它不写。
 - 结果是一张卡片，附在原回复下方；不改动、不接管你正在进行的对话。
 
-![评审卡片示例（一剑封喉 / 通过）](https://raw.githubusercontent.com/RainSnowYY/dsh-second-review/main/dsh-second-review/assets/card-preview.png)
+![评审卡片示例（一剑封喉 / 通过）](assets/card-preview.png)
 
 > 上图为评审卡片的实际布局：左竖线表示结论档位，条目带「影响」与「建议」，底栏标注评审模型、角色、耗时与版本。
 
@@ -151,7 +151,14 @@ SEC 是一个**主执行者 + 独立监督者**的组合：主模型完成回答
 
 > 当前仅在 **Windows 桌面端** 验证通过；macOS / Linux 未做测试。
 
-**方式一：本地目录**
+**方式一：按包名安装（推荐）**
+
+1. DSH → **插件** → **添加插件**；
+2. 在包名一栏填 `dsh-second-review`，确认安装（从 npm 取最新版）；
+3. 插件列表出现 `dsh-second-review`，点击启用；
+4. 完全退出并重新打开 DSH。
+
+**方式二：本地目录**
 
 1. 将 `dsh-second-review` 文件夹放到任意位置（路径可含空格与中文，勿改名）；
 2. DSH → **插件** → **添加插件**；
@@ -164,9 +171,9 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 4. 安装后插件列表出现 `dsh-second-review`，点击启用；
 5. 完全退出并重新打开 DSH。
 
-**方式二：压缩包**
+**方式三：压缩包**
 
-将 `dsh-second-review-1.3.1.tgz` 发给对方，在「添加插件」中选择该压缩包。
+将 `dsh-second-review-1.3.4.tgz` 发给对方，在「添加插件」中选择该压缩包。
 
 **设置页**位于 **插件 → 二次评审**，分四段：01 模型 / 02 评审模式 / 03 权限 / 04 关于。修改后需点击底部「保存」，未保存时页面会提示。
 
@@ -278,7 +285,7 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 
 ## 12 · 版本
 
-当前 **1.3.2**。
+当前 **1.3.4**。
 
 | 版本 | 主要内容 |
 |-|-|
@@ -296,6 +303,8 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 | **1.3.0** | 主按钮改为强调色玻璃；卡片入场、内容分段淡入、展开收起过渡；不注入全局样式、不引库 |
 | **1.3.1** | 引文核验收窄：仅核被复核的回复，归属词须紧邻引号；修复术语误报 |
 | **1.3.2** | 上架 npm；补仓库与 Issue 入口；README 增补 30 秒速览、设计动机、卡片示例图、故障排查、反馈渠道 |
+| **1.3.3** | 仓库根目录化后同步：repository 去掉 directory，README 图片改回相对路径（由 npm 依仓库地址解析） |
+| **1.3.4** | 安装文档补「按包名安装」；修正压缩包版本号与更新日志里的错字 |
 
 ---
 

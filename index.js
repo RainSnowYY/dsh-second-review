@@ -89,14 +89,20 @@ const MAX_CHARS = 60000
 const LEGACY_BUDGET_MS = 45000
 
 /* 版本号（0.7.0 起）：/config 会带出去，设置页「关于」直接显示，不用去翻 package.json */
-const VERSION = '1.3.5'
+const VERSION = '1.3.6'
 
 /* ---------------- 配置（副模型 + 自动评审 + 主刀） ---------------- */
 
 const DEFAULT_CONFIG = {
   provider: 'deepseek-account',
-  model: 'deepseek-flash',
+  /* 1.3.6：副模型默认走 Pro 档，而且"跟着版本走" —— modelAuto 打开时不用存具体 id，
+     每次评审现查这个 provider 的模型清单，挑名字里带 pro 的最新一代。
+     DSH 哪天把 DeepSeek-V4-Pro 换成 V4.1-Pro，装插件的人不用改设置也跟着变。 */
+  model: 'deepseek-v4-pro',
+  modelAuto: true,
   auto: false,
+  // 1.3.6：重合提示弹窗的"不再提示"（只在用户自己勾了才为 true）
+  hideSameSourceModal: false,
   mock: false,
   /* 副模型能不能改文件：默认关（2026-11-09 他选的 B）。
      关着的时候工具表里根本没有 write_file，模型连"想调"都无从下手；
@@ -115,6 +121,10 @@ const DEFAULT_CONFIG = {
      她把一条自己编出来的用户消息当成用户说的，还照着它删了信、改了记忆。
      纯本地字符串比对 —— 不调模型、不花钱、不拖慢评审。 */
   checkQuotes: true,
+  /* 1.3.6：自动评审走到哪一步才触发（用户自己选，插件只负责执行）。
+     'every'   = 每条回复都评（1.3.5 及以前的行为，默认，别偷偷改人家的习惯）
+     'actions' = 只有这一轮真动过手（写文件／跑命令／发消息／工作区有变化）才评 */
+  autoMode: 'every',
 }
 
 const CONFIG_FILE = path.join(os.homedir(), '.dsh', 'dsh-second-review', 'config.json')
@@ -938,6 +948,133 @@ export function sameModel(a, b) {
   return !!am && am === bm
 }
 
+/* 1.3.6：Pro 档自动跟随 —— 从模型清单里挑名字带 pro 的最新一版。
+   查不到清单／清单里没有 pro，就退回配置里存的 id，绝不乱猜、也不擅自换成便宜档。 */
+export function pickProModel(list) {
+  const ids = (Array.isArray(list) ? list : [])
+    .map((m) => String((m && typeof m === 'object' ? m.id : m) || ''))
+    .filter((id) => id && /pro/i.test(id))
+  if (!ids.length) return ''
+  const ver = (id) => (id.match(/\d+(?:[._]\d+)*/g) || []).join('.').split(/[._]/).filter(Boolean).map(Number)
+  ids.sort((a, b) => {
+    const va = ver(a)
+    const vb = ver(b)
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+      const x = va[i] || 0
+      const y = vb[i] || 0
+      if (x !== y) return y - x
+    }
+    return a.localeCompare(b)
+  })
+  return ids[0]
+}
+
+export async function resolveReviewModel(llm, cfg) {
+  if (!cfg || cfg.modelAuto !== true) return cfg && cfg.model
+  try {
+    const list = await llm.listModels(cfg.provider)
+    const pro = pickProModel(list)
+    if (pro) return pro
+  } catch {}
+  return cfg.model
+}
+
+/* ---------------- 1.3.6：会话说得清的账，都从日志里算，不再问模型 ----------------
+   会话日志里每一轮事件都带 seq / turn，assistant/message 上带 usage：
+   {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens}
+   （2026-11-11 从本机真实会话解出来验过）。所以"用了多少 token"可以纯代码算，
+   不额外调一次模型、不花钱。 */
+
+function logItems(session) {
+  const log = (session && session.log) || {}
+  return Object.entries(log)
+    .map(([k, e]) => ({ seq: Number(e && e.seq) || Number(k), e }))
+    .filter((x) => Number.isFinite(x.seq))
+    .sort((a, b) => a.seq - b.seq)
+}
+
+/* 被评的那条回复属于第几轮（turn） */
+export function turnOf(session, beforeSeq) {
+  const limit = Number(beforeSeq)
+  let turn = null
+  for (const { seq, e } of logItems(session)) {
+    if (Number.isFinite(limit) && seq > limit) break
+    if (e && e.type === 'assistant/message' && e.data && typeof e.data.turn === 'number') turn = e.data.turn
+  }
+  return turn
+}
+
+/* 这一轮主模型花了多少 token（多步／多轮的都按 turn 加总） */
+export function usageOfTurn(session, beforeSeq) {
+  const turn = turnOf(session, beforeSeq)
+  if (turn === null) return null
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, messages: 0 }
+  for (const { e } of logItems(session)) {
+    if (!e || e.type !== 'assistant/message' || !e.data || e.data.turn !== turn) continue
+    const u = e.data.usage
+    if (!u) continue
+    sum.input += Number(u.inputTokens) || 0
+    sum.output += Number(u.outputTokens) || 0
+    sum.cacheRead += Number(u.cacheReadTokens) || 0
+    sum.cacheWrite += Number(u.cacheWriteTokens) || 0
+    sum.total += Number(u.totalTokens) || 0
+    sum.messages += 1
+  }
+  return sum.messages ? sum : null
+}
+
+/* 这一轮到底动没动手：写文件／跑命令／发消息／工作区有变化才算。
+   纯聊天、纯只读的问答不算 —— 这正是"省钱的闸门"的判据。 */
+const ACTION_TOOL_RE = /(write|edit|delete|remove|move|rename|mkdir|patch|shell|bash|pwsh|powershell|exec|spawn|install|upload|send|post|publish|run)/i
+
+export function turnTouched(session, beforeSeq) {
+  const turn = turnOf(session, beforeSeq)
+  if (turn === null) return false
+  let touched = false
+  for (const { e } of logItems(session)) {
+    if (!e || !e.data || e.data.turn !== turn) continue
+    if (e.type === 'workspace/changes') return true
+    if (e.type === 'tool/call' && ACTION_TOOL_RE.test(String(e.data.name || ''))) touched = true
+  }
+  return touched
+}
+
+/* 评审自己那几次调用，finish 里要是带 usage 就取出来；没带就返回 null（不编数字）。 */
+export function usageOfFinish(finish) {
+  if (!finish || typeof finish !== 'object') return null
+  const u =
+    finish.usage ||
+    (finish.message && finish.message.usage) ||
+    (finish.result && finish.result.usage) ||
+    (finish.data && finish.data.usage) ||
+    null
+  if (!u || typeof u !== 'object') return null
+  const n = (x) => Number(x) || 0
+  const input = n(u.inputTokens || u.input_tokens || u.promptTokens)
+  const output = n(u.outputTokens || u.output_tokens || u.completionTokens)
+  const cacheRead = n(u.cacheReadTokens || u.cache_read_tokens)
+  const cacheWrite = n(u.cacheWriteTokens || u.cache_write_tokens)
+  if (!input && !output && !cacheRead && !cacheWrite) return null
+  return { input, output, cacheRead, cacheWrite, total: input + output }
+}
+
+/* 把一次评审里每一步的用量加起来（带工具时会有好几次调用） */
+export function sumUsage(list) {
+  if (!Array.isArray(list) || !list.length) return null
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  let any = false
+  for (const u of list) {
+    if (!u) continue
+    any = true
+    sum.input += Number(u.input) || 0
+    sum.output += Number(u.output) || 0
+    sum.cacheRead += Number(u.cacheRead) || 0
+    sum.cacheWrite += Number(u.cacheWrite) || 0
+    sum.total += Number(u.total) || 0
+  }
+  return any ? sum : null
+}
+
 export function saveReview(rootDir, review, steps, meta) {
   try {
     const dir = path.join(rootDir, '二次评审')
@@ -1260,14 +1397,22 @@ export function apply(ctx) {
           if (body && typeof body.mock === 'boolean') patch.mock = body.mock
           if (body && typeof body.allowWrite === 'boolean') patch.allowWrite = body.allowWrite
           if (body && typeof body.noticeAck === 'boolean') patch.noticeAck = body.noticeAck
+          // 1.3.6：Pro 档自动跟随；重合弹窗的"不再提示"
+          if (body && typeof body.modelAuto === 'boolean') patch.modelAuto = body.modelAuto
+          if (body && typeof body.hideSameSourceModal === 'boolean') patch.hideSameSourceModal = body.hideSameSourceModal
           // 0.9.0：两个闸都能从设置页改，夹到合理区间（0 ＝ 不设）
           if (body && Number.isFinite(Number(body.budgetSec))) patch.budgetSec = Math.max(0, Math.min(1800, Math.round(Number(body.budgetSec))))
           if (body && Number.isFinite(Number(body.idleSec))) patch.idleSec = Math.max(0, Math.min(1800, Math.round(Number(body.idleSec))))
           // 1.1.0：引文核验的开关（默认开，纯本地比对，不花钱）
           if (body && typeof body.checkQuotes === 'boolean') patch.checkQuotes = body.checkQuotes
-          return sendJson(res, 200, { ok: true, config: writeConfig(patch), file: CONFIG_FILE, version: VERSION })
+          // 1.3.6：自动评审范围，只认这两个值（别让乱七八糟的值把闸门关死）
+          if (body && (body.autoMode === 'every' || body.autoMode === 'actions')) patch.autoMode = body.autoMode
+          const saved = writeConfig(patch)
+          // 1.3.6：顺手把"自动跟着走"最终落到哪个模型告诉前端（设置页和卡片都要显示它）
+          return sendJson(res, 200, { ok: true, config: saved, resolvedModel: await resolveReviewModel(scope.get('llm'), saved), file: CONFIG_FILE, version: VERSION })
         }
-        return sendJson(res, 200, { ok: true, config: readConfig(), file: CONFIG_FILE, version: VERSION })
+        const cfg = readConfig()
+        return sendJson(res, 200, { ok: true, config: cfg, resolvedModel: await resolveReviewModel(scope.get('llm'), cfg), file: CONFIG_FILE, version: VERSION })
       } catch (error) {
         return sendErr(res, error)
       }
@@ -1417,6 +1562,8 @@ export function apply(ctx) {
         if (!llm) return sendJson(res, 503, { ok: false, error: 'llm service missing' })
 
         let rows = []
+        // 1.3.6：闸门和用量都要会话原始日志，先把找到的那份留住（demo 探针没有，就是 null）
+        let sessionObj = null
         const cfg = readConfig()
 
         // 进度：前端带着 job=来的，就边跑边往里写"想什么"（只进内存，不进记录）
@@ -1457,8 +1604,11 @@ export function apply(ctx) {
         const entry = sidKey ? readSwaps(cfg)[sidKey] : null
         const reviewCfg =
           !demo && entry && entry.saved && entry.saved.provider && entry.saved.model
-            ? { ...cfg, provider: entry.saved.provider, model: entry.saved.model }
+            ? { ...cfg, provider: entry.saved.provider, model: entry.saved.model, modelAuto: false }
             : cfg
+        // 1.3.6：Pro 档跟着版本走（只在 modelAuto 打开时生效；主刀互换时用的是原主模型，不动）
+        const runModel = await resolveReviewModel(llm, reviewCfg)
+        const runCfg = runModel && runModel !== reviewCfg.model ? { ...reviewCfg, model: runModel } : reviewCfg
 
         let rootDir = null
         if (demo) {
@@ -1493,6 +1643,7 @@ export function apply(ctx) {
             if (hit && hit.session) {
               rootDir = makeRoot(rootOf(hit.session))
               rows = transcriptOf(hit.session, anchor)
+              sessionObj = hit.session
             } else {
               return sendJson(res, 404, {
                 ok: false,
@@ -1503,7 +1654,19 @@ export function apply(ctx) {
           } else {
             rootDir = makeRoot(rootOf(session))
             rows = transcriptOf(session, anchor)
+            sessionObj = session
           }
+        }
+
+        /* 1.3.6：闸门。用户把 autoMode 设成 'actions' 时，纯聊天的轮次不调副模型 —— 直接跳过。
+           判断全在本地（看这轮有没有写文件／跑命令／发消息），不花钱、不猜。 */
+        if (!demo && body.auto === true && String(cfg.autoMode || 'every') === 'actions' && !turnTouched(sessionObj, anchor)) {
+          return sendJson(res, 200, {
+            ok: true,
+            skipped: true,
+            reason: '这一轮没动过手（没写文件、没跑命令、没发消息），自动评审跳过了',
+            gate: 'actions',
+          })
         }
 
         if (rows.length === 0) return sendJson(res, 200, { ok: true, empty: true, verdict: 'pass', note: '这一轮还没有对话内容', major: [], minor: [], steps: 0 })
@@ -1527,6 +1690,8 @@ export function apply(ctx) {
         const allowWrite = cfg.allowWrite === true
         const steps = []
         const finishes = []
+        // 1.3.6：评审自己每次调用的用量（finish 里带就收，不带就空着，绝不估算）
+        const usages = []
         let finalText = ''
         let budget = 0
         let timedOut = false
@@ -1557,7 +1722,8 @@ export function apply(ctx) {
             break
           }
           // 工具不设次数上限（他 2026-11-09 明确说过：磨洋工是"看不该看的、说不该说的"，不是限次数）
-          const r = await streamWithRetry(llm, messages, tools, reviewCfg, onDelta, deadlineAt, stopOpts)
+          const r = await streamWithRetry(llm, messages, tools, runCfg, onDelta, deadlineAt, stopOpts)
+          usages.push(usageOfFinish(r.finish))
           finishes.push({
             step: i,
             kind: r.finish && r.finish.kind,
@@ -1585,7 +1751,7 @@ export function apply(ctx) {
           messages.push({
             role: 'assistant',
             id: randomUUID(),
-            source: { kind: 'assistant', provider: reviewCfg.provider, model: reviewCfg.model },
+            source: { kind: 'assistant', provider: runCfg.provider, model: runCfg.model },
             ...(r.replayState ? { replayState: r.replayState } : {}),
             content: blocks,
           })
@@ -1684,7 +1850,7 @@ export function apply(ctx) {
         const swapped = !demo && !!(entry && entry.saved && entry.saved.provider && entry.saved.model)
         const reviewer = {
           provider: String(reviewCfg.provider || ''),
-          model: String(reviewCfg.model || ''),
+          model: String(runCfg.model || ''),
           role: swapped ? '原主模型（副模型主刀时互换）' : '副模型',
         }
         /* 1.3.5：这一评是"换了个脑子"，还是"同一双眼睛又看了一遍"？
@@ -1693,7 +1859,7 @@ export function apply(ctx) {
         const sameSource = !!(main && sameModel(main, reviewer))
         const saved = demo
           ? ''
-          : saveReview(rootDir, parsed, steps, { sessionId, seq: anchor, model: reviewCfg.provider + ' / ' + reviewCfg.model, reviewer, provenance })
+          : saveReview(rootDir, parsed, steps, { sessionId, seq: anchor, model: runCfg.provider + ' / ' + runCfg.model, reviewer, provenance })
         const payload = {
           ok: true,
           topic: parsed.topic,
@@ -1717,6 +1883,11 @@ export function apply(ctx) {
           version: VERSION,
           // 这一轮到底花了多久（0.9.1）：5 分钟那种，卡上得看得见
           elapsedMs: Date.now() - startedAt,
+          // 1.3.6：这一轮主模型的用量（从会话日志算，零成本）＋ 复核自己的用量（finish 带才算）
+          usage: {
+            turn: demo ? null : usageOfTurn(sessionObj, anchor),
+            review: sumUsage(usages),
+          },
           parseFailed: parsed.parseFailed,
           truncated,
           timedOut,

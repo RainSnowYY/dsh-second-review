@@ -102,6 +102,11 @@ function barOf(el) {
   const bar = walk(el).find((n) => n.props && n.props.style && n.props.style.height === 2)
   return bar && bar.kids && bar.kids[0]
 }
+function tiersOf(el) {
+  return walk(el)
+    .filter((n) => typeof n.type === 'function' && n.type.name === 'Btn')
+    .map((n) => n.props.tier)
+}
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
 }
@@ -132,11 +137,27 @@ const cases = [
       // 1.1.0：引文核验（机器查的，不靠模型）
       provenance: { checked: 2, found: 1, missing: ['我什么时候说让你回信了'], userCount: 6 },
       reviewer: { provider: 'deepseek-account', model: 'deepseek-flash', role: '副模型' },
+      // 1.3.6：这一次的账（复核＋本轮）
+      usage: { review: { input: 1234, output: 567, cacheRead: 0 }, turn: { input: 1534, output: 443, cacheRead: 14720 } },
     },
   ],
   ['完成 通过', { state: 'done', verdict: 'pass', note: '没发现必须改的地方。', major: [], minor: [] }],
+  [
+    '完成 与主模型相同',
+    {
+      state: 'done',
+      verdict: 'pass',
+      note: '',
+      major: [],
+      minor: [],
+      reviewer: { provider: 'deepseek-account', model: 'deepseek-flash', role: '副模型' },
+      main: { provider: 'deepseek-account', model: 'deepseek-flash' },
+      sameSource: true,
+    },
+  ],
   ['完成 说不清', { state: 'done', verdict: 'unclear', note: '它说不清这一轮在评什么', major: [], minor: [] }],
   ['失败', { state: 'error', note: 'provider 断流' }],
+  ['闸门跳过', { state: 'skipped', note: '这一轮没动过手（没写文件、没跑命令、没发消息），自动评审跳过了' }],
   ['首次告知', { state: 'notice', pendingKind: 'manual' }],
 ]
 
@@ -154,6 +175,7 @@ for (const [label, value] of cases) {
     assert(fill.props.style.width === '51.11%', '细线宽度不对：' + fill.props.style.width + '（应为 23000/45000）')
     assert(fill.props.style.background !== '#f59e0b', '还没到点就变琥珀了')
     assert(text.indexOf('字幕最后一行在这里') >= 0, '字幕没露出来')
+    assert(text.indexOf('让我拆一下') >= 0, '碎碎念（思考中的那句）没画出来')
   }
   if (label === '评审中 到点') {
     const fill = barOf(el)
@@ -178,7 +200,17 @@ for (const [label, value] of cases) {
     assert(tiers.filter((t) => t === 'pri').length === 1, '未评这排应该正好一个主按钮，实际 ' + JSON.stringify(tiers))
     assert(tiers.filter((t) => t === 'sec').length >= 1, '次按钮没画出来：' + JSON.stringify(tiers))
   }
+  if (label === '完成 与主模型相同') {
+    assert(text.indexOf('与主模型相同') >= 0, '副模型和主模型是同一个时，卡片上没提示')
+  }
+  if (label === '闸门跳过') {
+    assert(text.indexOf('自动评审跳过') >= 0, '跳过了却没写出来')
+    assert(tiersOf(el).indexOf('pri') < 0, '跳过以后不该再摆一个主按钮（还没花钱，别催他）')
+  }
   if (label === '完成 一剑封喉') {
+    assert(text.indexOf('复核 1.2k进') >= 0, '卡片末尾没显示复核的 token')
+    assert(text.indexOf('本轮 1.5k进') >= 0, '卡片末尾没显示这一轮的 token')
+    assert(text.indexOf('与主模型相同') < 0, '两模型不同却报了"与主模型相同"')
     assert(text.indexOf('deepseek-flash') >= 0, '卡片上没有署名（模型名）')
     assert(text.indexOf('署名') >= 0, '卡片上没写"署名"两个字')
     assert(text.indexOf('引文核验') >= 0, '卡片上没有引文核验那一行')

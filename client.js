@@ -31,6 +31,16 @@ window.__ModuleLoader__.load({
        用 em 而不是 px，他自己调了系统/界面字号，卡片跟着一起变。 */
     const FS = { body: '1em', small: '0.95em', min: '0.9em' }
 
+    /* ---------------- 思考中的碎碎念（1.3.5） ----------------
+       ↓↓↓ 文案填这里：一行一句，随便加、随便删，轮着放 ↓↓↓
+       他 2026-11-11 说"文案我来想" —— 到时候整段替换即可，别的地方不用动。
+       什么时候出现：评审在跑、模型还没吐字的时候（不动手的时候不硬凹）。 */
+    const THINK_LINES = [
+      '嗯…让我拆一下',
+      '先把这一轮看清楚',
+      '别急，我在看',
+    ]
+
     /* ---------------- 玻璃（方案 B：搬「开关」，不搬代码） ----------------
        壁纸插件 dsh-plugin-wallpaper-engine 把玻璃参数写成 <body> 上的 CSS 变量，
        body 下面所有元素都能读到。我们只读这几个：
@@ -46,6 +56,21 @@ window.__ModuleLoader__.load({
 
     const R = 10 // "角圆润的方形"（他 2026-11-09 说的）—— 不是胶囊，也不是直角
     const ACCENT = 'var(--we-accent, #3b82f6)'
+
+    /* 1.3.6：弹窗要"非黑即白" —— 跟着现在的皮肤判个明暗，不猜也不写死深色 */
+    const isDarkUI = () => {
+      try {
+        const bg = getComputedStyle(document.body).backgroundColor || ''
+        const m = bg.match(/\d+(\.\d+)?/g)
+        if (!m || m.length < 3) return true
+        const r = Number(m[0])
+        const g = Number(m[1])
+        const b = Number(m[2])
+        return 0.299 * r + 0.587 * g + 0.114 * b < 128
+      } catch {
+        return true
+      }
+    }
     const HAIRLINE = 'rgba(128,128,128,0.24)'
     const HAIRLINE_SOFT = 'rgba(128,128,128,0.16)'
     const INK_SOFT = 'rgba(128,128,128,0.18)'
@@ -414,7 +439,7 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 设置（模块级，整页共用一份） ---------------- */
 
-    const settings = { value: null, pending: null }
+    const settings = { value: null, pending: null, resolved: '' }
 
     function loadSettings(force) {
       if (!force && settings.value) return Promise.resolve(settings.value)
@@ -423,6 +448,8 @@ window.__ModuleLoader__.load({
         .then((r) => r.json())
         .then((j) => {
           settings.value = (j && j.ok && j.config) || { auto: false }
+          // 1.3.6：自动 Pro 档时，后端会告诉我们最终落到哪个模型（卡片和弹窗都要显示它）
+          settings.resolved = (j && j.ok && j.resolvedModel) || ''
           return settings.value
         })
         .catch(() => {
@@ -438,7 +465,7 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 副模型主刀（每个会话各存各的，互不覆盖） ---------------- */
 
-    const swap = { bySession: {}, pending: {} }
+    const swap = { bySession: {}, pending: {}, main: {} }
 
     /* 同一会话里所有卡片共用一份"主刀开没开"，不然 A 卡开了 B 卡还显示关 */
     const swapShared = { value: {}, listeners: new Set() }
@@ -469,7 +496,11 @@ window.__ModuleLoader__.load({
       swap.pending[k] = fetch(API + '/swap?sessionId=' + encodeURIComponent(k))
         .then((r) => r.json())
         .then((j) => {
-          if (j && j.ok) swap.bySession[k] = !!j.on
+          if (j && j.ok) {
+            swap.bySession[k] = !!j.on
+            // 1.3.6：顺手把"这个会话现在的主模型"留住 —— 点评审前要拿它比是否重合
+            if (j.current && typeof j.current === 'object') swap.main[k] = { provider: String(j.current.provider || ''), model: String(j.current.model || '') }
+          }
           return !!swap.bySession[k]
         })
         .catch(() => !!swap.bySession[k])
@@ -698,6 +729,15 @@ window.__ModuleLoader__.load({
       // 在一张卡上开了，别的卡上的开关还显示"关"（GPT 4.6 第 4 条）。改成共用一份。
       const [swapOn, setSwapOn] = useSwap(sidKey)
 
+      // 碎碎念：正在评的时候才轮播；停了／到点了就不逗他（他 2026-11-11 要的"轻松一点"）
+      const [quipIdx, setQuipIdx] = useState(0)
+      const quipOn = !!(entry && entry.state === 'loading')
+      useEffect(() => {
+        if (!quipOn) return undefined
+        const t = setInterval(() => setQuipIdx((i) => i + 1), 3200)
+        return () => clearInterval(t)
+      }, [quipOn])
+
       useEffect(() => {
         let alive = true
         loadSwap(sessionId).then((v) => {
@@ -740,6 +780,33 @@ window.__ModuleLoader__.load({
           },
           '副模型主刀' + (swapOn ? '：开' : ''),
         )
+      /* 1.3.6：这张卡这次花了多少 —— 全从日志和返回里算，不为显示数字多调一次模型。
+         复核＝副模型那次（要它真给了用量才显示）；本轮＝主模型这一轮的账（日志里本来就有）。 */
+      const fmtTok = (n) => {
+        const v = Number(n) || 0
+        if (!v) return '0'
+        return v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(v)
+      }
+      const usageChip = (u) => {
+        if (!u || typeof u !== 'object') return null
+        const r = u.review
+        const t = u.turn
+        const parts = []
+        if (r && (r.input || r.output)) parts.push('复核 ' + fmtTok(r.input) + '进/' + fmtTok(r.output) + '出')
+        if (t && (t.input || t.output)) parts.push('本轮 ' + fmtTok(t.input) + '进/' + fmtTok(t.output) + '出')
+        if (!parts.length) return null
+        const cache = []
+        if (r && r.cacheRead) cache.push('复核缓存读 ' + fmtTok(r.cacheRead))
+        if (t && t.cacheRead) cache.push('本轮缓存读 ' + fmtTok(t.cacheRead))
+        return React.createElement(
+          'span',
+          {
+            style: { opacity: 0.5, fontSize: FS.min, whiteSpace: 'nowrap' },
+            title: '这些数字是从会话日志和调用回执里算的，没有为显示它们多调一次模型' + (cache.length ? '；' + cache.join('，') : ''),
+          },
+          parts.join(' · '),
+        )
+      }
       const state = entry && entry.state
       const major = (entry && entry.major) || []
       const minor = (entry && entry.minor) || []
@@ -752,7 +819,7 @@ window.__ModuleLoader__.load({
         let alive = true
         loadSettings().then((v) => {
           if (alive) setAuto(!!(v && v.auto))
-          if (alive) setReviewerName(v && v.model ? String(v.model) : '')
+          if (alive) setReviewerName(v && (v.resolved || v.model) ? String(v.resolved || v.model) : '')
         })
         return () => {
           alive = false
@@ -794,11 +861,22 @@ window.__ModuleLoader__.load({
         fetch(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: sessionId || '', seq: seq, job, mock: kind === 'mock' }),
+          body: JSON.stringify({ sessionId: sessionId || '', seq: seq, job, mock: kind === 'mock', auto: kind === 'auto' }),
         })
           .then((r) => r.json())
           .then((json) => {
             if (json && json.ok) {
+              // 1.3.6：闸门跳过 —— 没花钱，也别装成评过了
+              if (json.skipped) {
+                setEntry({
+                  state: 'skipped',
+                  major: [],
+                  minor: [],
+                  note: String(json.reason || '自动评审跳过了这一轮'),
+                  auto: kind === 'auto',
+                })
+                return
+              }
               if (json.verdict === 'error') {
                 setEntry({
                   state: 'error',
@@ -834,6 +912,8 @@ window.__ModuleLoader__.load({
                 timedOut: !!json.timedOut,
                 mock: !!json.mock,
                 steps: Array.isArray(json.steps) ? json.steps : [],
+                // 1.3.6：这一次的账（主模型那轮 + 复核自己），拿不到就是 null
+                usage: json.usage || null,
               })
             } else {
               setEntry({ state: 'error', major: [], minor: [], note: String((json && json.error) || '未知原因') })
@@ -911,8 +991,231 @@ window.__ModuleLoader__.load({
       // 手动再评：允许一次。上次是假数据就继续用假数据（别让人点一下"重评"就悄悄花了钱）
       const rerun = () => {
         inFlight.add(key)
-        run(entry && entry.mock ? 'mock' : 'manual')
+        startReview(entry && entry.mock ? 'mock' : 'manual')
         inFlight.delete(key)
+      }
+
+      /* ---------------- 1.3.6：主副重合 → 点之前拦一下 ----------------
+         重合的判断：这个会话的当前主模型（/swap 顺手带回来的）和副模型是同一个。
+         只拦"用户自己点评审"这一刻；自动评审照旧在卡片上标出来，不弹窗打扰。 */
+      const [fix, setFix] = useState(null)
+      const [fixNoMore, setFixNoMore] = useState(false)
+      const [fixProviders, setFixProviders] = useState([])
+      const [fixModels, setFixModels] = useState([])
+      const fixProvider = fix ? String(fix.provider || '') : ''
+      useEffect(() => {
+        if (!fix) return undefined
+        let alive = true
+        fetch(API + '/models')
+          .then((r) => r.json())
+          .then((j) => {
+            if (alive && j && j.ok) setFixProviders(j.providers || [])
+          })
+          .catch(() => {})
+        return () => {
+          alive = false
+        }
+      }, [!!fix])
+      useEffect(() => {
+        if (!fix || !fixProvider) return undefined
+        let alive = true
+        fetch(API + '/models?provider=' + encodeURIComponent(fixProvider))
+          .then((r) => r.json())
+          .then((j) => {
+            if (alive && j && j.ok) setFixModels(j.models || [])
+          })
+          .catch(() => {})
+        return () => {
+          alive = false
+        }
+      }, [fixProvider])
+
+      const modelIdOf = (m) => String((m && typeof m === 'object' ? m.model || m.id : m) || '').trim().toLowerCase()
+      const sameAsMain = () => {
+        const main = swap.main[sidKey]
+        const s = settings.value
+        if (!main || !s || s.hideSameSourceModal) return false
+        // 自动 Pro 档时，比的是后端最终会用的那个模型（settings.resolved），不是配置里那个旧 id
+        const sub = s.modelAuto ? settings.resolved : s.model
+        return !!modelIdOf(main) && modelIdOf(main) === modelIdOf(sub)
+      }
+      const startReview = (kind) => {
+        const acked = !!(settings.value && settings.value.noticeAck)
+        if (kind !== 'mock' && acked && sameAsMain()) {
+          const s = settings.value
+          setFix({
+            provider: String(s.provider || ''),
+            model: String(s.modelAuto ? settings.resolved || s.model || '' : s.model || ''),
+            kind,
+          })
+          setFixNoMore(false)
+          return
+        }
+        run(kind)
+      }
+      const closeFix = (save) => {
+        const patch = { hideSameSourceModal: !!fixNoMore }
+        if (save && fix) {
+          patch.provider = fix.provider
+          patch.model = fix.model
+          patch.modelAuto = false
+        }
+        fetch(API + '/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+          .then((r) => r.json())
+          .then((j) => {
+            if (j && j.ok) {
+              settings.value = j.config
+              if (j.config && j.config.model) setReviewerName(String(j.config.model))
+            }
+          })
+          .catch(() => {})
+        const kind = fix && fix.kind
+        setFix(null)
+        if (save && kind) run(kind)
+      }
+      const fixOptions = (list, fallbackId) => {
+        const arr = (list && list.length ? list : [{ id: fallbackId || '', name: fallbackId || '' }])
+          .map((p) => (typeof p === 'string' ? { id: p, name: p } : { id: String((p && p.id) || ''), name: String((p && p.name) || (p && p.id) || '') }))
+          .filter((p) => p.id)
+        return arr.map((p) => React.createElement('option', { key: p.id, value: p.id }, p.name === p.id ? p.id : p.name + '（' + p.id + '）'))
+      }
+      const fixModal = () => {
+        if (!fix) return null
+        const dark = isDarkUI()
+        const bg = dark ? '#151515' : '#fdfdfd'
+        const fg = dark ? '#f3f3f3' : '#111'
+        const sub = dark ? 'rgba(243,243,243,0.62)' : 'rgba(17,17,17,0.6)'
+        const line = dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.14)'
+        const inputBg = dark ? '#1f1f1f' : '#fff'
+        const selectStyle = {
+          width: '100%',
+          padding: '7px 8px',
+          borderRadius: 8,
+          border: '1px solid ' + line,
+          background: inputBg,
+          color: fg,
+          fontSize: FS.small,
+          marginTop: 6,
+        }
+        return React.createElement(
+          'div',
+          {
+            // 把整页压暗，只留这一个窗是亮的
+            style: {
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.58)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 9999,
+              padding: 16,
+            },
+            onClick: (e) => {
+              if (e && e.target === e.currentTarget) closeFix(false)
+            },
+          },
+          React.createElement(
+            'div',
+            {
+              style: {
+                width: 420,
+                maxWidth: '100%',
+                background: bg,
+                color: fg,
+                border: '1px solid ' + line,
+                borderRadius: 12,
+                padding: '18px 18px 14px',
+                boxShadow: '0 24px 60px rgba(0,0,0,0.45)',
+                fontSize: FS.body,
+                lineHeight: 1.7,
+              },
+            },
+            React.createElement('div', { style: { fontWeight: 600, fontSize: '1.05em', marginBottom: 4 } }, '当前主副模型重合'),
+            React.createElement(
+              'div',
+              { style: { color: sub, fontSize: FS.small, marginBottom: 12 } },
+              '副模型和主模型是同一个（' +
+                String((swap.main[sidKey] && swap.main[sidKey].model) || fix.model || '') +
+                '），等于让同一双眼睛检查自己 —— 复核效果不佳。换一个再评。',
+            ),
+            React.createElement('div', { style: { color: sub, fontSize: FS.min, marginBottom: 2 } }, '服务商'),
+            React.createElement(
+              'select',
+              {
+                value: fix.provider || '',
+                style: selectStyle,
+                onChange: (e) => setFix({ ...fix, provider: e.target.value, model: '' }),
+              },
+              ...fixOptions(fixProviders, fix.provider),
+            ),
+            React.createElement('div', { style: { color: sub, fontSize: FS.min, margin: '10px 0 2px' } }, '副模型'),
+            React.createElement(
+              'select',
+              {
+                value: fix.model || '',
+                style: selectStyle,
+                onChange: (e) => setFix({ ...fix, model: e.target.value }),
+              },
+              fix.model ? null : React.createElement('option', { key: '__none', value: '' }, '（选一个）'),
+              ...fixOptions(fixModels, ''),
+            ),
+            React.createElement(
+              'label',
+              { style: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 12, color: sub, fontSize: FS.min, cursor: 'pointer' } },
+              React.createElement('input', {
+                type: 'checkbox',
+                checked: !!fixNoMore,
+                style: { accentColor: ACCENT },
+                onChange: (e) => setFixNoMore(!!e.target.checked),
+              }),
+              '不再提示',
+            ),
+            React.createElement(
+              'div',
+              { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 } },
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => closeFix(false),
+                  style: {
+                    padding: '8px 16px',
+                    borderRadius: 8,
+                    background: 'transparent',
+                    color: fg,
+                    border: '1px solid ' + line,
+                    fontSize: FS.small,
+                    cursor: 'pointer',
+                  },
+                },
+                '取消',
+              ),
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => closeFix(true),
+                  style: {
+                    padding: '8px 16px',
+                    borderRadius: 8,
+                    background: ACCENT,
+                    color: '#fff',
+                    border: '1px solid transparent',
+                    fontSize: FS.small,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  },
+                },
+                '保存并评审',
+              ),
+            ),
+          ),
+        )
       }
 
       // 停止这次评审（0.9.0）：不设总时长之后，"能随时喊停"就是新的保险丝。
@@ -1087,6 +1390,23 @@ window.__ModuleLoader__.load({
               ? '已等 ' + secs + ' 秒，上限 ' + Math.round(budget / 1000) + ' 秒（真实时间，不是猜的）'
               : '已等 ' + secs + ' 秒，不设上限（这条线只表示它还活着）',
           }),
+          // 碎碎念：一句一行地换，像有人在旁边用大白话垫着（到点／卡住／停止时不出现）
+          !over && !stalling && !stopping
+            ? React.createElement(
+                'div',
+                {
+                  style: {
+                    marginTop: 6,
+                    fontSize: FS.min,
+                    opacity: 0.45,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  },
+                },
+                '· ' + THINK_LINES[quipIdx % THINK_LINES.length],
+              )
+            : null,
           think
             ? React.createElement(
                 Collapse,
@@ -1112,6 +1432,20 @@ window.__ModuleLoader__.load({
                 ),
               )
             : null,
+        )
+      }
+
+      // 1.3.6：闸门跳过（没花钱，也别装成评过了）
+      if (state === 'skipped') {
+        return React.createElement(
+          'div',
+          {
+            key: 'skipped',
+            ref: grow,
+            style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: FS.min, opacity: 0.6 },
+          },
+          React.createElement('span', { style: { opacity: 0.9 } }, '自动评审跳过：' + String((entry && entry.note) || '这一轮没动过手').slice(0, 80)),
+          React.createElement(Btn, { tier: 'lite', onClick: () => run('manual'), title: '这一轮还是评一次（会调用副模型、花钱）' }, '还是评一下'),
         )
       }
 
@@ -1337,6 +1671,7 @@ window.__ModuleLoader__.load({
                   entry && entry.version ? React.createElement('span', null, '· v' + entry.version) : null,
                 )
               : null,
+            usageChip(entry && entry.usage),
             // 1.3.5：副模型和主模型是同一个 → 这次复核基本等于自评，先说清楚（他 2026-11-11 要的）
             entry && entry.sameSource
               ? React.createElement(
@@ -1354,6 +1689,7 @@ window.__ModuleLoader__.load({
             React.createElement('span', { style: { flex: 1, minWidth: 8 } }),
             swapChip(),
           ),
+          fixModal(),
         )
       }
 
@@ -1363,7 +1699,7 @@ window.__ModuleLoader__.load({
         { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: FS.body } },
         React.createElement(
           Btn,
-          { tier: 'pri', onClick: () => run('manual'), title: '让 ' + (reviewerName || '副模型') + ' 挑一遍这一轮的毛病' },
+          { tier: 'pri', onClick: () => startReview('manual'), title: '让 ' + (reviewerName || '副模型') + ' 挑一遍这一轮的毛病' },
           React.createElement(Mark, { size: 14 }),
           '二次评审',
         ),
@@ -1384,6 +1720,7 @@ window.__ModuleLoader__.load({
               '（设置页没挂上：' + initErrors.join('；') + '）',
             )
           : null,
+        fixModal(),
       )
     }
 
@@ -1454,6 +1791,8 @@ window.__ModuleLoader__.load({
         String(c.provider || ''),
         String(c.model || ''),
         !!c.auto,
+        String(c.autoMode || 'every'),
+        c.modelAuto !== false,
         !!c.mock,
         !!c.allowWrite,
         Number(c.budgetSec) || 0,
@@ -1522,6 +1861,8 @@ window.__ModuleLoader__.load({
               provider: cfg.provider,
               model: cfg.model,
               auto: !!cfg.auto,
+              autoMode: cfg.autoMode === 'actions' ? 'actions' : 'every',
+              modelAuto: cfg.modelAuto !== false,
               mock: !!cfg.mock,
               allowWrite: !!cfg.allowWrite,
               budgetSec: Number(cfg.budgetSec) || 0,
@@ -1561,9 +1902,29 @@ window.__ModuleLoader__.load({
           : note || '改动不会自动保存'
       const hintColor = failedSave ? '#ef4444' : dirty ? '#f59e0b' : 'inherit'
 
+      /* 1.3.6：预设只改开关，绝不偷偷换模型 —— 最终决定权在用户手上（他 2026-11-11 的原话） */
+      const applyPreset = (p) => {
+        if (!cfg) return
+        if (p === 'light') setCfg({ ...cfg, auto: true, autoMode: 'actions', mock: false })
+        else if (p === 'delivery') setCfg({ ...cfg, auto: false, autoMode: 'every', mock: false })
+        else if (p === 'peek') setCfg({ ...cfg, auto: false, autoMode: 'every', mock: true })
+        setNote(p === 'peek' ? '已切到「只看不评」：接下来评的是假数据、不花钱' : '已套用预设 —— 点下面的保存才生效')
+      }
+
       return React.createElement(
         'div',
         { style: { padding: '4px 0', maxWidth: 620 } },
+
+        // 1.3.6：三个预设摆最上面，装完不用读文档也能选
+        React.createElement(
+          'div',
+          { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '0 0 14px' } },
+          React.createElement('span', { style: { opacity: 0.7, minWidth: 88 } }, '预设'),
+          React.createElement(Btn, { tier: 'sec', onClick: () => applyPreset('light'), title: '日常：不每条都评，只有它动过手（写文件、跑命令、发消息）才自动评' }, '日常轻量'),
+          React.createElement(Btn, { tier: 'sec', onClick: () => applyPreset('delivery'), title: '关键交付：不自动评，你点哪一轮评哪一轮' }, '关键交付'),
+          React.createElement(Btn, { tier: 'lite', onClick: () => applyPreset('peek'), title: '先看看卡片长什么样：假数据、不花钱、不留记录' }, '只看不评'),
+          React.createElement('span', { style: { opacity: 0.45, fontSize: FS.min } }, '只改开关，模型还是你自己选'),
+        ),
 
         section(
           '01',
@@ -1580,7 +1941,7 @@ window.__ModuleLoader__.load({
                 Select,
                 {
                   value: cfg.provider || '',
-                  onChange: (e) => setCfg({ ...cfg, provider: e.target.value, model: '' }),
+                  onChange: (e) => setCfg({ ...cfg, provider: e.target.value, model: '', modelAuto: true }),
                 },
                 ...providerOptions.map((p) =>
                   React.createElement('option', { key: p.id, value: p.id }, p.name === p.id ? p.id : p.name + '（' + p.id + '）'),
@@ -1589,10 +1950,16 @@ window.__ModuleLoader__.load({
               React.createElement(
                 Select,
                 {
-                  value: cfg.model || '',
-                  onChange: (e) => setCfg({ ...cfg, model: e.target.value }),
+                  // 1.3.6：默认「自动 Pro 档」—— 不存具体 id，DSH 升了版本它自己跟着走
+                  value: cfg.modelAuto === false ? cfg.model || '' : '__auto__',
+                  onChange: (e) => {
+                    const v = e.target.value
+                    if (v === '__auto__') setCfg({ ...cfg, modelAuto: true })
+                    else setCfg({ ...cfg, model: v, modelAuto: false })
+                  },
                 },
-                cfg.model ? null : React.createElement('option', { key: '__none', value: '' }, '（选一个）'),
+                React.createElement('option', { key: '__auto__', value: '__auto__' }, '自动：Pro 档'),
+                cfg.modelAuto === false && cfg.model ? null : React.createElement('option', { key: '__none', value: '' }, '（手动选一个）'),
                 ...models
                   .map((m) => (typeof m === 'string' ? { id: m, name: m } : { id: String((m && m.id) || ''), name: String((m && m.name) || (m && m.id) || '') }))
                   .filter((m) => m.id)
@@ -1601,8 +1968,14 @@ window.__ModuleLoader__.load({
             ),
           ),
           React.createElement('div', { style: { opacity: 0.55, fontSize: FS.min, marginTop: 6 } }, '评审由这个模型来做；「副模型主刀」打开时，下一轮答复也换成它。'),
-          // 1.3.5：默认值本身就同源 —— 这里先说一句，别等花了钱才发现是自评
-          React.createElement('div', { style: { opacity: 0.5, fontSize: FS.min, marginTop: 2 } }, '默认是 deepseek-flash；主模型如果也是它，这次复核等于自评 —— 换不同来源、或至少不同档位才有用。'),
+          // 1.3.6：默认 Pro 档、自动跟随；手动选了别的就按你选的来
+          React.createElement(
+            'div',
+            { style: { opacity: 0.5, fontSize: FS.min, marginTop: 2 } },
+            cfg.modelAuto === false
+              ? '当前是手动指定：' + String(cfg.model || '未选') + '。想省事可以切回「自动：Pro 档」，DSH 升级后它自己跟着换。'
+              : '默认走 Pro 档（' + String((models.find((m) => /pro/i.test(String((m && m.id) || m))) || {}).id || '按你的 provider 实际清单') + '），DSH 出了新一代 Pro 会自动跟着换；主模型如果也是它，这次复核等于自评。',
+          ),
         ),
 
         section(
@@ -1611,10 +1984,34 @@ window.__ModuleLoader__.load({
           React.createElement(Check, {
             checked: cfg.auto,
             onChange: (e) => setCfg({ ...cfg, auto: e.target.checked }),
-            title: '每条回复结束后自动评一次',
-            desc: '会调用副模型，产生费用',
+            title: '自动评审',
+            desc: '会调用副模型，产生费用；评到哪一步由下面那行决定',
             style: { marginBottom: 2 },
           }),
+          // 1.3.6：闸门 —— 用户决定"每条都评"还是"只有动过手才评"
+          React.createElement(
+            'div',
+            { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', margin: '2px 0 4px' } },
+            React.createElement('span', { style: { opacity: 0.7, minWidth: 88 } }, '自动评审范围'),
+            React.createElement(
+              'span',
+              { style: { marginLeft: 'auto' } },
+              React.createElement(
+                Select,
+                {
+                  value: cfg.autoMode === 'actions' ? 'actions' : 'every',
+                  onChange: (e) => setCfg({ ...cfg, autoMode: e.target.value }),
+                },
+                React.createElement('option', { key: 'every', value: 'every' }, '每条回复都评（默认）'),
+                React.createElement('option', { key: 'actions', value: 'actions' }, '只有动过手的那一轮才评'),
+              ),
+            ),
+          ),
+          React.createElement(
+            'div',
+            { style: { opacity: 0.5, fontSize: FS.min, marginBottom: 6 } },
+            '「动过手」＝写文件、跑命令、发消息，或这一轮工作区有改动；纯聊天、纯只读的问答不评。判断全在本地，不花钱。',
+          ),
           React.createElement(Check, {
             checked: cfg.mock,
             onChange: (e) => setCfg({ ...cfg, mock: e.target.checked }),

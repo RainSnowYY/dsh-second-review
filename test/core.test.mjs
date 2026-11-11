@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(ROOT, '记忆卡', '00-核心记忆卡.md'), '私人�
 fs.writeFileSync(path.join(ROOT, '普通文档.md'), '公开的')
 
 const mod = await import(new URL('../index.js', import.meta.url).href)
-const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, sameModel, READ_TOOLS, WRITE_TOOL } = mod
+const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, sameModel, turnOf, usageOfTurn, turnTouched, usageOfFinish, sumUsage, pickProModel, resolveReviewModel, READ_TOOLS, WRITE_TOOL } = mod
 
 test.after(() => {
   try {
@@ -785,4 +785,99 @@ test('不同模型不算；缺模型也不算（宁可不说，不许瞎说）',
 test('也吃字符串（别的地方可能只传模型名）', () => {
   assert.equal(sameModel('deepseek-flash', { model: 'deepseek-flash' }), true)
   assert.equal(sameModel('deepseek-flash', 'deepseek-pro'), false)
+})
+
+/* ---------------- 1.3.6：账从日志里算（不调模型）＋自动评审闸门 ---------------- */
+
+function fakeSession(extra = {}) {
+  return {
+    log: {
+      1: { type: 'user/message', seq: 1, data: { turn: 1 } },
+      2: { type: 'assistant/message', seq: 2, data: { turn: 1, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, totalTokens: 15 } } },
+      3: { type: 'tool/call', seq: 3, data: { turn: 1, name: 'read_file', arguments: '{}' } },
+      4: { type: 'assistant/message', seq: 4, data: { turn: 1, usage: { inputTokens: 20, outputTokens: 7, cacheReadTokens: 1, totalTokens: 27 } } },
+      ...extra,
+    },
+  }
+}
+
+test('轮次：按被评的那条消息往前找 turn', () => {
+  assert.equal(turnOf(fakeSession(), 4), 1)
+  assert.equal(turnOf(fakeSession(), 2), 1)
+  assert.equal(turnOf({ log: {} }, 4), null)
+})
+
+test('这一轮主模型用了多少 token：按 turn 加总，不调模型', () => {
+  const u = usageOfTurn(fakeSession(), 4)
+  assert.equal(u.input, 30)
+  assert.equal(u.output, 12)
+  assert.equal(u.cacheRead, 4)
+  assert.equal(u.messages, 2)
+  assert.equal(usageOfTurn({ log: {} }, 4), null)
+})
+
+test('闸门：只读工具不算动手', () => {
+  assert.equal(turnTouched(fakeSession(), 4), false)
+})
+
+test('闸门：写文件／跑命令／工作区变动都算动手', () => {
+  assert.equal(turnTouched(fakeSession({ 3: { type: 'tool/call', seq: 3, data: { turn: 1, name: 'write_file' } } }), 4), true)
+  assert.equal(turnTouched(fakeSession({ 3: { type: 'tool/call', seq: 3, data: { turn: 1, name: 'pwsh' } } }), 4), true)
+  assert.equal(turnTouched(fakeSession({ 5: { type: 'workspace/changes', seq: 5, data: { turn: 1 } } }), 4), true)
+})
+
+test('评审自己的用量：finish 里带就取，几种形状都认，没有就 null（不许估）', () => {
+  assert.deepEqual(usageOfFinish({ usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 } }), {
+    input: 100,
+    output: 20,
+    cacheRead: 900,
+    cacheWrite: 0,
+    total: 120,
+  })
+  assert.equal(usageOfFinish({ message: { usage: { input_tokens: 5, output_tokens: 6 } } }).total, 11)
+  assert.equal(usageOfFinish({ kind: 'completed' }), null)
+  assert.equal(usageOfFinish(null), null)
+})
+
+test('多步评审的用量按次相加', () => {
+  const sum = sumUsage([
+    { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, total: 120 },
+    null,
+    { input: 50, output: 5, cacheRead: 30, cacheWrite: 0, total: 55 },
+  ])
+  assert.equal(sum.input, 150)
+  assert.equal(sum.output, 25)
+  assert.equal(sum.cacheRead, 30)
+  assert.equal(sumUsage([null, undefined]), null)
+  assert.equal(sumUsage([]), null)
+})
+
+/* ---------------- 1.3.6：默认副模型＝自动 Pro 档 ---------------- */
+
+test('从模型清单里挑 Pro 档', () => {
+  const list = [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro', name: 'V4-Pro' }]
+  assert.equal(pickProModel(list), 'deepseek-v4-pro')
+})
+
+test('出了新一代 Pro，自动选新的（DSH 升级不用改设置）', () => {
+  assert.equal(pickProModel(['deepseek-v4-pro', 'deepseek-v4.1-pro']), 'deepseek-v4.1-pro')
+  assert.equal(pickProModel([{ id: 'deepseek-v5-pro' }, { id: 'deepseek-v4.1-pro' }]), 'deepseek-v5-pro')
+})
+
+test('清单里没有 Pro：不乱选一个便宜的充数', () => {
+  assert.equal(pickProModel(['deepseek-flash']), '')
+  assert.equal(pickProModel([]), '')
+  assert.equal(pickProModel(null), '')
+})
+
+test('手动指定模型时不去查清单、也不改人家的选择', async () => {
+  let called = 0
+  const llm = { listModels: async () => (called++, []) }
+  assert.equal(await resolveReviewModel(llm, { provider: 'x', model: 'my-model', modelAuto: false }), 'my-model')
+  assert.equal(called, 0)
+})
+
+test('自动档但查不到清单：退回配置里的 id，不报错', async () => {
+  const llm = { listModels: async () => { throw new Error('offline') } }
+  assert.equal(await resolveReviewModel(llm, { provider: 'x', model: 'deepseek-v4-pro', modelAuto: true }), 'deepseek-v4-pro')
 })

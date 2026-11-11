@@ -1337,6 +1337,20 @@ window.__ModuleLoader__.load({
                   entry && entry.version ? React.createElement('span', null, '· v' + entry.version) : null,
                 )
               : null,
+            // 1.3.5：副模型和主模型是同一个 → 这次复核基本等于自评，先说清楚（他 2026-11-11 要的）
+            entry && entry.sameSource
+              ? React.createElement(
+                  'span',
+                  {
+                    title:
+                      '主模型和副模型是同一个模型' +
+                      (entry.main && entry.main.model ? '（' + String(entry.main.model) + '）' : '') +
+                      '，独立视角接近于零。换一个不同来源、或至少不同档位的副模型才有用。',
+                    style: { color: '#f59e0b', fontSize: FS.min, whiteSpace: 'nowrap', opacity: 0.95 },
+                  },
+                  '与主模型相同 · 自评',
+                )
+              : null,
             React.createElement('span', { style: { flex: 1, minWidth: 8 } }),
             swapChip(),
           ),
@@ -1587,6 +1601,8 @@ window.__ModuleLoader__.load({
             ),
           ),
           React.createElement('div', { style: { opacity: 0.55, fontSize: FS.min, marginTop: 6 } }, '评审由这个模型来做；「副模型主刀」打开时，下一轮答复也换成它。'),
+          // 1.3.5：默认值本身就同源 —— 这里先说一句，别等花了钱才发现是自评
+          React.createElement('div', { style: { opacity: 0.5, fontSize: FS.min, marginTop: 2 } }, '默认是 deepseek-flash；主模型如果也是它，这次复核等于自评 —— 换不同来源、或至少不同档位才有用。'),
         ),
 
         section(

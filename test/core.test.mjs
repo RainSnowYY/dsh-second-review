@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(ROOT, '记忆卡', '00-核心记忆卡.md'), '私人�
 fs.writeFileSync(path.join(ROOT, '普通文档.md'), '公开的')
 
 const mod = await import(new URL('../index.js', import.meta.url).href)
-const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, READ_TOOLS, WRITE_TOOL } = mod
+const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, sameModel, READ_TOOLS, WRITE_TOOL } = mod
 
 test.after(() => {
   try {
@@ -763,4 +763,26 @@ test('落盘 md 带引文核验一节', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/* ---------------- 1.3.5：主副模型是不是同一个 ---------------- */
+
+test('同一个模型：忽略大小写和首尾空格', () => {
+  assert.equal(sameModel({ provider: 'deepseek-account', model: 'deepseek-flash' }, { provider: 'deepseek-account', model: ' DeepSeek-Flash ' }), true)
+})
+
+test('同一个模型名、provider 不同也算同一个（还是同一双眼睛）', () => {
+  assert.equal(sameModel({ provider: 'a', model: 'deepseek-flash' }, { provider: 'b', model: 'deepseek-flash' }), true)
+})
+
+test('不同模型不算；缺模型也不算（宁可不说，不许瞎说）', () => {
+  assert.equal(sameModel({ provider: 'a', model: 'deepseek-flash' }, { provider: 'a', model: 'deepseek-pro' }), false)
+  assert.equal(sameModel({ provider: 'a', model: '' }, { provider: 'a', model: '' }), false)
+  assert.equal(sameModel(null, { provider: 'a', model: 'deepseek-flash' }), false)
+  assert.equal(sameModel(undefined, undefined), false)
+})
+
+test('也吃字符串（别的地方可能只传模型名）', () => {
+  assert.equal(sameModel('deepseek-flash', { model: 'deepseek-flash' }), true)
+  assert.equal(sameModel('deepseek-flash', 'deepseek-pro'), false)
 })

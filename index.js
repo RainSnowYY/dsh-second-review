@@ -89,7 +89,7 @@ const MAX_CHARS = 60000
 const LEGACY_BUDGET_MS = 45000
 
 /* 版本号（0.7.0 起）：/config 会带出去，设置页「关于」直接显示，不用去翻 package.json */
-const VERSION = '1.3.4'
+const VERSION = '1.3.5'
 
 /* ---------------- 配置（副模型 + 自动评审 + 主刀） ---------------- */
 
@@ -927,6 +927,17 @@ export function verifyUserQuotes(rows) {
   return result
 }
 
+/* 1.3.5：主模型和副模型是不是"同一个"。
+   只判完全相同这一层：同一个 model 换个 provider，还是同一双眼睛；
+   不同 provider 的模型命名各异，硬猜"同源"会误报（小问 2026-11-10 的判断，我认同）。
+   只用来提示，不用来拦截：只有一个 Key 的人照样允许重选。 */
+export function sameModel(a, b) {
+  const pick = (x) => String((x && typeof x === 'object' ? x.model : x) || '').trim().toLowerCase()
+  const am = pick(a)
+  const bm = pick(b)
+  return !!am && am === bm
+}
+
 export function saveReview(rootDir, review, steps, meta) {
   try {
     const dir = path.join(rootDir, '二次评审')
@@ -1306,6 +1317,29 @@ export function apply(ctx) {
       }
     }
 
+    /* 1.3.5：这个会话"现在的主模型"是谁。
+       走 DSH 自己的 agent.model.current()（副模型主刀也用它）；
+       读不到就返回 null —— 卡片上不显示提示，绝不为了一句提示去猜。 */
+    const currentMain = (sid) => {
+      try {
+        const agents = scope.get('agents')
+        const live = agents && typeof agents.list === 'function' ? agents.list() : []
+        const normId = (v) => String(v || '').replace(/^session-/, '')
+        const hit = (Array.isArray(live) ? live : []).find((a) => {
+          try {
+            return a && (normId(a.id) === normId(sid) || (a.session && normId(a.session.id) === normId(sid)))
+          } catch {
+            return false
+          }
+        })
+        const cur = hit && hit.model && typeof hit.model.current === 'function' ? hit.model.current() : null
+        if (!cur) return null
+        return { provider: String(cur.provider || ''), model: String(cur.model || '') }
+      } catch {
+        return null
+      }
+    }
+
     // 副模型主刀：把这一轮"谁在答"换成副模型（走 DSH 官方的 agent.model.select，不碰消息归属）
     // 状态按会话分开存：A 会话开了主刀，不会把 B 会话的"原来的模型"覆盖掉。
     const swap = async (req, res) => {
@@ -1653,6 +1687,10 @@ export function apply(ctx) {
           model: String(reviewCfg.model || ''),
           role: swapped ? '原主模型（副模型主刀时互换）' : '副模型',
         }
+        /* 1.3.5：这一评是"换了个脑子"，还是"同一双眼睛又看了一遍"？
+           主模型从 DSH 的 agent.model.current() 现取；读不到就是 null，卡片上不提示 —— 不猜。 */
+        const main = demo ? null : currentMain(sessionId)
+        const sameSource = !!(main && sameModel(main, reviewer))
         const saved = demo
           ? ''
           : saveReview(rootDir, parsed, steps, { sessionId, seq: anchor, model: reviewCfg.provider + ' / ' + reviewCfg.model, reviewer, provenance })
@@ -1670,6 +1708,9 @@ export function apply(ctx) {
           items: [...parsed.major, ...parsed.minor],
           saved,
           reviewer,
+          // 1.3.5：主模型是谁、和副模型是不是同一个（同一个＝这次复核基本是自评）
+          main,
+          sameSource,
           // 1.1.0：引文核验结果（机器查的，不靠模型）。checked=0 就是这一轮它没引你的话
           provenance,
           // 这张卡是哪个版本画出来的（0.9.0 加）—— 他遇到过一次"改了没生效"

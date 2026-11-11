@@ -3,7 +3,7 @@
 > Independent second-opinion review for DeepSeek Harness.
 > 主模型负责执行，副模型负责复核；结论以卡片形式附在原回复下方。
 
-![version](https://img.shields.io/badge/version-1.3.4-blue)
+![version](https://img.shields.io/badge/version-1.3.5-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![dsh](https://img.shields.io/badge/DSH-0.2.2--rc.1%20verified-informational)
@@ -173,7 +173,7 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 
 **方式三：压缩包**
 
-将 `dsh-second-review-1.3.4.tgz` 发给对方，在「添加插件」中选择该压缩包。
+将 `dsh-second-review-1.3.5.tgz` 发给对方，在「添加插件」中选择该压缩包。
 
 **设置页**位于 **插件 → 二次评审**，分四段：01 模型 / 02 评审模式 / 03 权限 / 04 关于。修改后需点击底部「保存」，未保存时页面会提示。
 
@@ -285,7 +285,7 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 
 ## 12 · 版本
 
-当前 **1.3.4**。
+当前 **1.3.5**。
 
 | 版本 | 主要内容 |
 |-|-|
@@ -305,6 +305,7 @@ file:C:\Users\<用户名>\Documents\dsh-second-review
 | **1.3.2** | 上架 npm；补仓库与 Issue 入口；README 增补 30 秒速览、设计动机、卡片示例图、故障排查、反馈渠道 |
 | **1.3.3** | 仓库根目录化后同步：repository 去掉 directory，README 图片改回相对路径（由 npm 依仓库地址解析） |
 | **1.3.4** | 安装文档补「按包名安装」；修正压缩包版本号与更新日志里的错字 |
+| **1.3.5** | 副模型与主模型是同一个模型时，卡片标出「与主模型相同 · 自评」；设置页补默认值提醒；修正「自动评审默认可关闭」这句歧义 |
 
 ---
 

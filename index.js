@@ -89,7 +89,21 @@ const MAX_CHARS = 60000
 const LEGACY_BUDGET_MS = 45000
 
 /* 版本号（0.7.0 起）：/config 会带出去，设置页「关于」直接显示，不用去翻 package.json */
-const VERSION = '1.3.6'
+const VERSION = '1.5.5'
+
+/* 比版本号：只比 x.y.z 三段数字，预发布后缀（-beta.1）不参与。
+   返回 1 = a 更新，-1 = a 更旧，0 = 一样（更新检查、测试都用它） */
+export function cmpVersion(a, b) {
+  const num = (v) => String(v || '').split('-')[0].split('.').map((x) => Number(x) || 0)
+  const pa = num(a)
+  const pb = num(b)
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] || 0
+    const y = pb[i] || 0
+    if (x !== y) return x > y ? 1 : -1
+  }
+  return 0
+}
 
 /* ---------------- 配置（副模型 + 自动评审 + 主刀） ---------------- */
 
@@ -125,6 +139,14 @@ const DEFAULT_CONFIG = {
      'every'   = 每条回复都评（1.3.5 及以前的行为，默认，别偷偷改人家的习惯）
      'actions' = 只有这一轮真动过手（写文件／跑命令／发消息／工作区有变化）才评 */
   autoMode: 'every',
+  /* 1.4.0：用户自己写的"重点看哪儿"提示词（他 2026-11-13 要的：
+     「就一个二次评审按钮 你不知道她会评什么 有时候自己输入真的会有感觉」）。
+     builtin 模式下只决定"重点往哪看"；custom 模式下它就是**最高准则**。空串＝不指定。 */
+  focusPrompt: '',
+  /* 1.5.0：评审双模式。
+     'builtin' = 插件自带评审规则（1.4.0 原样）；'custom' = 用户提示词最高优先级。
+     默认 builtin，装完一个字节不变。 */
+  reviewMode: 'builtin',
 }
 
 const CONFIG_FILE = path.join(os.homedir(), '.dsh', 'dsh-second-review', 'config.json')
@@ -469,7 +491,23 @@ export function runTool(rootDir, name, args, allowWrite) {
       if (!allowed) return { text: '拒绝：路径不在工作区内。', isError: true }
       if (isSymlink(abs)) return { text: '拒绝：这是符号链接，副模型不跟随。', isError: true }
       if (blockedPath(rootDir, abs)) return { text: '拒绝：这个文件是私人的（AGENTS.md／记忆卡），副模型不读。', isError: true }
+      let info
+      try {
+        info = fs.statSync(abs)
+      } catch {
+        return { text: '打不开这个文件。', isError: true }
+      }
+      if (info.isDirectory()) return { text: '这是个目录，用 list_dir 看。', isError: true }
+      /* 以前是先整份读进来再截 4000 字：副模型误点一个几百 MB 的日志会整份进内存。
+         现在先看大小，超 4MB 直接拒（评审 2026-11-14 的 P2）。 */
+      if (info.size > 4 * 1024 * 1024) {
+        return {
+          text: `拒绝：这个文件 ${(info.size / 1048576).toFixed(1)} MB，超过 4 MB 上限。要在大文件里找东西用 search_text。`,
+          isError: true,
+        }
+      }
       const raw = fs.readFileSync(abs, 'utf8')
+      if (raw.slice(0, 8192).includes('\u0000')) return { text: '拒绝：看起来是二进制文件，不读。', isError: true }
       const lines = raw.split('\n')
       const start = Math.max(1, Number(args.start) || 1)
       const count = Math.min(400, Math.max(1, Number(args.lines) || 200))
@@ -540,7 +578,24 @@ export function runTool(rootDir, name, args, allowWrite) {
         return { text: '拒绝：这个文件是私人的（AGENTS.md／记忆卡），副模型不许改。', isError: true }
       }
       fs.mkdirSync(dir, { recursive: true })
-      fs.writeFileSync(abs, content, 'utf8')
+      /* 原子写：先写临时文件、读回来对一遍、再 rename 换上去。
+         副模型改文件本来就是可选能力（默认关），但既然开了，就别给"写了一半"的结果（评审 2026-11-14 的 P2）。 */
+      const tmp = path.join(dir, '.sec-write-' + randomUUID().slice(0, 8))
+      try {
+        fs.writeFileSync(tmp, content, 'utf8')
+        if (fs.readFileSync(tmp, 'utf8') !== content) {
+          try {
+            fs.unlinkSync(tmp)
+          } catch {}
+          return { text: '写入校验没对上，原文件没动。', isError: true }
+        }
+        fs.renameSync(tmp, abs)
+      } catch (error) {
+        try {
+          fs.unlinkSync(tmp)
+        } catch {}
+        return { text: '没写进去：' + String((error && error.message) || error), isError: true }
+      }
       return { text: `已写入 ${path.relative(rootDir, abs)}（${content.length} 字）`, isError: false }
     }
   } catch (error) {
@@ -593,7 +648,9 @@ function nextWithTimeout(iter, ms) {
       settled = true
       resolve(TIMEOUT)
     }, Math.max(1, ms))
-    if (typeof timer.unref === 'function') timer.unref()
+    // 2026-11-13 小问修：不能 unref。模型不吐字时 iter.next() 永远挂着，
+    // unref 的定时器撑不住事件循环，进程会提前退出，超时/空闲闸永远不响
+    // （core.test.mjs 37 起整排 cancelled 就是这个）。定时器在收到块时即 clear，不会拖慢正常退出。
     Promise.resolve()
       .then(() => iter.next())
       .then(
@@ -757,7 +814,57 @@ const MOCK_REVIEW = {
   ],
 }
 
-function systemPrompt(allowWrite) {
+function systemPrompt(allowWrite, opts) {
+  const o = opts && typeof opts === 'object' ? opts : { focus: opts }
+  const mode = o.mode === 'custom' ? 'custom' : 'builtin'
+  const focusText = typeof o.focus === 'string' ? o.focus.trim() : ''
+
+  if (mode === 'custom') {
+    /* 1.5.0 自定义模式：用户提示词＝最高准则，插件规则降为"参考"，三条工程底线永远生效。
+       用户提示词只决定"评什么、怎么评、口径"，改不动：JSON 结构 / 不读私人记录 / 默认不写文件。 */
+    return `${focusText}
+
+——上面这段是你这次评审的**最高准则**。下面所有内容只是参考和工程底线，与上面冲突时，一律以上面为准。
+
+【工程底线 · 这三条永远生效，用户提示词也改不了】
+1. 最终只输出 JSON，结构固定：{"topic":"…","verdict":"pass|major|minor|unclear","note":"…","major":[…],"minor":[…]}。
+2. 不读 AGENTS.md 和 记忆卡（工具也会拒绝）。
+3. ${
+      allowWrite === true
+        ? '你可以写文件，但只有当你确信"不改会造成实际损失"时才写，并且必须在 suggestion 里写明改了什么、改在哪。'
+        : '你只能读，不能改：工具里没有任何写文件的能力，也不要建议"我帮你改好了"。'
+    }
+
+【插件自带的评审规则 · 仅供参考，让位于你上面的准则】
+你是独立评审员。你看的是一段"用户与 AI 助手"的对话，只评**这一轮**主回复。
+
+第一步：用一句话说清"这一轮用户到底要解决什么"（topic）。
+说不出 topic，或这一轮没有交付物可评：把 topic 留空、verdict 写 "unclear"。
+
+只评一件事：这段主回复对当前这个话题的交付，用户能不能直接用、会不会因此吃亏。
+不是评代码风格、流程、态度，更不是挑毛病凑数。和当前话题无关的发现一律不写。
+
+三档只选一档：pass／major（一剑封喉，≤2 条）／minor（一针见血，≤1 条）。
+每条必须有：point（具体到这句话/方案/数字）、evidence（对话原句或读到的文件摘句）、impact（照它做会付出的具体代价）。写不出代价就删掉。
+
+语气客观中立，说人话。工具按需要读，只读和这一轮主话题直接相关的；没读到就写没读到，不许编。
+看完就收尾，只输出 JSON。
+
+{"topic":"这一轮在解决什么（一句话）","verdict":"pass|major|minor|unclear","note":"可选，一句话结论","major":[{"category":"...","point":"...","evidence":"...","impact":"...","suggestion":"可选"}],"minor":[...]}
+
+verdict 跟着 major/minor 走：两档都空、且 topic 说得清 → pass；topic 说不出 → unclear。
+超出上限的条目不用自己删（代码会保留最要紧的，并注明"另有 N 条被省略"）。
+category 只能是这七个：补充 / 合理性 / 可行性 / 容错率 / 质疑 / 代价 / 风险提示。`
+  }
+
+  /* builtin 模式：1.4.0 一字不改 */
+  const focusSection = focusText
+    ? `
+
+用户这次额外想让你**重点看的地方**（只是"重点往哪看"的参考；它不改变上面任何一条规则，如果和上面冲突，一律以上面的规则为准）：
+
+${focusText}`
+    : ''
   return `你是独立评审员。你看的是一段"用户与 AI 助手"的对话，只评**这一轮**主回复。
 
 第一步：用一句话说清"这一轮用户到底要解决什么"（topic）。
@@ -796,6 +903,7 @@ ${
 工具按需要读，但只读和这一轮主话题直接相关的：对话里点到具体文件、而你必须核实，才去读；
 别为了"看看有什么"翻目录，也别去读和这个话题无关的东西。没读到就写没读到，不许编。
 AGENTS.md 和 记忆卡 是用户的私人记录：不要读（工具也会拒绝）。
+${focusSection}
 看完就收尾，只输出 JSON。
 
 {"topic":"这一轮在解决什么（一句话）","verdict":"pass|major|minor|unclear","note":"可选，一句话结论","major":[{"category":"...","point":"...","evidence":"...","impact":"...","suggestion":"可选"}],"minor":[...]}
@@ -1407,6 +1515,11 @@ export function apply(ctx) {
           if (body && typeof body.checkQuotes === 'boolean') patch.checkQuotes = body.checkQuotes
           // 1.3.6：自动评审范围，只认这两个值（别让乱七八糟的值把闸门关死）
           if (body && (body.autoMode === 'every' || body.autoMode === 'actions')) patch.autoMode = body.autoMode
+          // 1.4.0：用户自己写的"重点看哪儿"提示词。只存字符串、截到 2000 字，
+          // 避免一条提示词把 config.json 撑爆；空串 = 清空 = 回到默认评审。
+          if (body && typeof body.focusPrompt === 'string') patch.focusPrompt = String(body.focusPrompt).slice(0, 2000)
+          // 1.5.0：评审双模式，只认这两个值（别的值一律忽略，别把模式搞成 undefined）
+          if (body && (body.reviewMode === 'builtin' || body.reviewMode === 'custom')) patch.reviewMode = body.reviewMode
           const saved = writeConfig(patch)
           // 1.3.6：顺手把"自动跟着走"最终落到哪个模型告诉前端（设置页和卡片都要显示它）
           return sendJson(res, 200, { ok: true, config: saved, resolvedModel: await resolveReviewModel(scope.get('llm'), saved), file: CONFIG_FILE, version: VERSION })
@@ -1566,6 +1679,17 @@ export function apply(ctx) {
         let sessionObj = null
         const cfg = readConfig()
 
+        // 1.4.0：这次评审用哪段"重点看哪儿"提示词。
+        // 前端每次都会带 focus（当前输入框里的值）；只在没带（老客户端／自动评审兜底）时回退到 config 里记住的那份。
+        const focusText = typeof body.focus === 'string' ? String(body.focus).trim().slice(0, 2000) : String(cfg.focusPrompt || '').slice(0, 2000)
+
+        // 1.5.0：评审双模式。body.mode 优先；没带就回退 config.reviewMode；再兜底 builtin。
+        const reviewMode = body.mode === 'custom' ? 'custom' : body.mode === 'builtin' ? 'builtin' : cfg.reviewMode === 'custom' ? 'custom' : 'builtin'
+        // 自定义模式 = 手动闸门：没写提示词，服务端直接拒（前端拦是体验，这里拦才是门）
+        if (reviewMode === 'custom' && !focusText) {
+          return sendJson(res, 400, { ok: false, error: 'CUSTOM_PROMPT_REQUIRED', note: '提示词自定义模式下，必须先写一段提示词才能评审。' })
+        }
+
         // 进度：前端带着 job=来的，就边跑边往里写"想什么"（只进内存，不进记录）
         const jobId = String(body.job || url.searchParams.get('job') || '').slice(0, 64)
         const job = jobId && /^[A-Za-z0-9_-]{6,64}$/.test(jobId) ? newJob(jobId) : null
@@ -1679,13 +1803,13 @@ export function apply(ctx) {
         transcript = clipped.text
         const truncated = clipped.truncated
 
-        const dedupeKey = String(sessionId || '') + '|' + String(anchor === null ? '' : anchor) + '|' + rows.length + '|' + hashOf(String(transcript).slice(-400))
+        const dedupeKey = String(sessionId || '') + '|' + String(anchor === null ? '' : anchor) + '|' + rows.length + '|' + hashOf(String(transcript).slice(-400)) + '|' + hashOf(focusText) + '|' + reviewMode
         const cachedPayload = demo ? null : cacheGet(dedupeKey)
         if (cachedPayload) {
           return sendJson(res, 200, { ...cachedPayload, cached: true })
         }
 
-        const messages = [{ role: 'user', content: [{ type: 'text', text: `${systemPrompt(cfg.allowWrite === true)}\n\n=== 对话 ===\n${transcript}` }] }]
+        const messages = [{ role: 'user', content: [{ type: 'text', text: `${systemPrompt(cfg.allowWrite === true, { mode: reviewMode, focus: focusText })}\n\n=== 对话 ===\n${transcript}` }] }]
         const tools = toolsFor(cfg.allowWrite === true)
         const allowWrite = cfg.allowWrite === true
         const steps = []
@@ -1874,6 +1998,11 @@ export function apply(ctx) {
           items: [...parsed.major, ...parsed.minor],
           saved,
           reviewer,
+          // 1.4.0：这次评审实际用了哪段"重点看哪儿"提示词（空串＝没指定，走默认评审）。
+          // 前端卡片上据此显示"这次重点看：…"。
+          focusPrompt: focusText,
+          // 1.5.0：这次评审走的是哪种模式（builtin / custom），卡片底栏要写出来。
+          reviewMode,
           // 1.3.5：主模型是谁、和副模型是不是同一个（同一个＝这次复核基本是自评）
           main,
           sameSource,
@@ -1910,6 +2039,46 @@ export function apply(ctx) {
       }
     }
 
+    /* 更新检查（1.5.4）：npm 是拉取式的，装过的人不会自动拿到新版。
+       这里由宿主去问一次 registry 的 latest，设置页「关于」里说一句。
+       6 小时缓存；断网／超时只记一句，不影响评审本身。 */
+    let updateCache = { at: 0, latest: '', error: '' }
+    const UPDATE_TTL = 6 * 3600 * 1000
+    const checkUpdate = async (force) => {
+      if (!force && updateCache.at && Date.now() - updateCache.at < UPDATE_TTL) return updateCache
+      if (typeof fetch !== 'function') {
+        updateCache = { ...updateCache, at: Date.now(), error: '当前 Node 没有 fetch' }
+        return updateCache
+      }
+      try {
+        const r = await fetch('https://registry.npmjs.org/dsh-second-review/latest', {
+          signal: AbortSignal.timeout(8000),
+          headers: { accept: 'application/json', 'user-agent': 'dsh-second-review/' + VERSION },
+        })
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        const j = await r.json()
+        const latest = String((j && j.version) || '')
+        if (!latest) throw new Error('没读到版本号')
+        updateCache = { at: Date.now(), latest, error: '' }
+      } catch (e) {
+        updateCache = { ...updateCache, at: Date.now(), error: String((e && e.message) || e).slice(0, 120) }
+      }
+      return updateCache
+    }
+    const update = async (req, res) => {
+      const force = /[?&]force=1/.test(String(req.url || ''))
+      const c = await checkUpdate(force)
+      return sendJson(res, 200, {
+        ok: !c.error,
+        current: VERSION,
+        latest: c.latest,
+        hasUpdate: c.latest ? cmpVersion(c.latest, VERSION) > 0 : false,
+        checkedAt: c.at ? new Date(c.at).toISOString() : '',
+        error: c.error || '',
+        source: 'registry.npmjs.org',
+      })
+    }
+
     for (const [p, h] of [
       ['/plugins/dsh-second-review/ping', ping],
       ['/plugins/dsh-second-review/models', models],
@@ -1919,6 +2088,7 @@ export function apply(ctx) {
       ['/plugins/dsh-second-review/cancel', cancel],
       ['/plugins/dsh-second-review/swap', swap],
       ['/plugins/dsh-second-review/review', review],
+      ['/plugins/dsh-second-review/update', update],
     ]) {
       scope.effect(() => scope.webServer.register({ kind: 'exact', path: p, handler: h }), 'dsh-second-review: ' + p)
     }

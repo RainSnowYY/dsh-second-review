@@ -31,14 +31,29 @@ window.__ModuleLoader__.load({
        用 em 而不是 px，他自己调了系统/界面字号，卡片跟着一起变。 */
     const FS = { body: '1em', small: '0.95em', min: '0.9em' }
 
-    /* ---------------- 思考中的碎碎念（1.3.5） ----------------
-       ↓↓↓ 文案填这里：一行一句，随便加、随便删，轮着放 ↓↓↓
-       他 2026-11-11 说"文案我来想" —— 到时候整段替换即可，别的地方不用动。
-       什么时候出现：评审在跑、模型还没吐字的时候（不动手的时候不硬凹）。 */
+    /* ---------------- 思考中的碎碎念（1.3.6） ----------------
+       ↓↓↓ 文案填这里：一行一句，随便加、随便删，随机轮着放 ↓↓↓
+       他 2026-11-11 亲手写的九句，就按这个顺序存，每次随机挑一句、不连着重复。 */
     const THINK_LINES = [
-      '嗯…让我拆一下',
-      '先把这一轮看清楚',
-      '别急，我在看',
+      '嗯……帮你理一理',
+      '正在认真评审，稍等哦',
+      '让我沉下来想一想',
+      '试着从这边看看',
+      '搬个小板凳坐下来想',
+      '嗯……这个说法稳妥吗',
+      '让我多问自己一个为什么',
+      '补一块砖，站得更稳',
+      '调调焦距，看得更清',
+    ]
+
+    /* ---------------- 重点提示词预设（1.4.0） ----------------
+       他 2026-11-13 的原话：「就一个二次评审按钮 你不知道她会评什么
+       有时候自己输入真的会有感觉」。所以评审卡上放输入框 ＋ 三个预设，
+       只决定"重点往哪看"，不改变系统提示词里的任何硬约束。 */
+    const FOCUS_PRESETS = [
+      { key: 'safety', label: '安全风险', text: '重点看：会不会删错东西、丢数据、白花钱，有没有安全或权限上的坑。' },
+      { key: 'logic', label: '逻辑漏洞', text: '重点看：论证有没有漏洞、结论站不站得住、有没有被它自己的话带偏。' },
+      { key: 'usable', label: '可用性', text: '重点看：给出的方案能不能直接照着做，有没有漏掉关键步骤或前置条件。' },
     ]
 
     /* ---------------- 玻璃（方案 B：搬「开关」，不搬代码） ----------------
@@ -465,6 +480,115 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 副模型主刀（每个会话各存各的，互不覆盖） ---------------- */
 
+    /* ---------------- 评审重点提示词（1.4.0） ----------------
+       "记住上次写的"是全局一份，不是每个会话各存一份；所有评审卡共用这一个值。
+       useFocus 返回 [当前值, 设置函数]，设置时同步写进 focusShared 并通知所有卡。 */
+    const focusShared = { value: '', touched: false, listeners: new Set() }
+
+    function useFocus() {
+      const [focus, setFocusState] = useState(focusShared.value)
+      useEffect(() => {
+        const l = () => setFocusState(focusShared.value)
+        focusShared.listeners.add(l)
+        return () => focusShared.listeners.delete(l)
+      }, [])
+      const setFocus = (v) => {
+        focusShared.value = String(v == null ? '' : v)
+        focusShared.touched = true
+        focusShared.listeners.forEach((l) => l())
+      }
+      return [focus, setFocus]
+    }
+
+    /* ---------------- 1.5.0：评审模式（builtin/custom）全局共享 ---------------- */
+    const modeShared = { value: 'builtin', touched: false, listeners: new Set() }
+
+    function useMode() {
+      const [mode, setModeState] = useState(modeShared.value)
+      useEffect(() => {
+        const l = () => setModeState(modeShared.value)
+        modeShared.listeners.add(l)
+        return () => modeShared.listeners.delete(l)
+      }, [])
+      const setMode = (v) => {
+        modeShared.value = v === 'custom' ? 'custom' : 'builtin'
+        modeShared.touched = true
+        modeShared.listeners.forEach((l) => l())
+      }
+      return [mode, setMode]
+    }
+
+    /* ---------------- 1.5.0：副输入框（浮条）的全局状态 ----------------
+       评审卡点「二次评审」→ openComposer 拉起副框（评审用途），记下"提交时要评哪条"；
+       用户手动点浮条入口 → openLeadComposer 拉起（主刀用途）。
+       副框回车 → 调 submitFn（评审）或走 leadShared（主刀），再关掉。 */
+    const composerShared = { open: false, purpose: 'review', target: null, submitFn: null, listeners: new Set() }
+    const emitComposer = () => composerShared.listeners.forEach((l) => l())
+    function openComposer(target, submitFn) {
+      composerShared.open = true
+      composerShared.purpose = 'review'
+      composerShared.target = target
+      composerShared.submitFn = submitFn
+      emitComposer()
+    }
+    function openLeadComposer() {
+      composerShared.open = true
+      composerShared.purpose = 'lead'
+      composerShared.target = null
+      composerShared.submitFn = null
+      emitComposer()
+    }
+    function closeComposer() {
+      composerShared.open = false
+      composerShared.target = null
+      composerShared.submitFn = null
+      emitComposer()
+    }
+    function useComposer() {
+      const [, force] = useState(0)
+      useEffect(() => {
+        const l = () => force((n) => n + 1)
+        composerShared.listeners.add(l)
+        return () => composerShared.listeners.delete(l)
+      }, [])
+      return composerShared
+    }
+
+    /* ---------------- 1.5.0：副模型主刀（让副模型直接答）的桥接 ----------------
+       shell.overlay 拿不到 sessionId 和 inputActions，但 turnTail 有。
+       所以副框只负责"收集内容 + 广播"，真正切模型 / 发消息由当前会话的 turnTail 执行：
+         requestLead(text) —— 副框回车：一次性主刀（切副模型 → 发内容 → 稍后切回主模型）
+       activeSid 由 turnTail 挂载时更新（最后渲染的回复所属会话 ≈ 当前会话）。 */
+    const leadShared = { activeSid: '', request: null, listeners: new Set() }
+    const emitLead = () => leadShared.listeners.forEach((l) => l())
+    function requestLead(text) {
+      leadShared.request = { text: String(text || ''), at: Date.now() }
+      emitLead()
+    }
+    function useLead() {
+      const [, force] = useState(0)
+      useEffect(() => {
+        const l = () => force((n) => n + 1)
+        leadShared.listeners.add(l)
+        return () => leadShared.listeners.delete(l)
+      }, [])
+      return leadShared
+    }
+
+    /* 写回 config（fire-and-forget），focus / mode 共用一个口子 */
+    function saveConfig(patch) {
+      fetch(API + '/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch || {}),
+      })
+        .then((r) => r.json())
+        .then((j) => {
+          if (j && j.ok) settings.value = j.config
+        })
+        .catch(() => {})
+    }
+
     const swap = { bySession: {}, pending: {}, main: {} }
 
     /* 同一会话里所有卡片共用一份"主刀开没开"，不然 A 卡开了 B 卡还显示关 */
@@ -734,7 +858,14 @@ window.__ModuleLoader__.load({
       const quipOn = !!(entry && entry.state === 'loading')
       useEffect(() => {
         if (!quipOn) return undefined
-        const t = setInterval(() => setQuipIdx((i) => i + 1), 3200)
+        const t = setInterval(() => {
+          setQuipIdx((i) => {
+            if (THINK_LINES.length < 2) return 0
+            let n = i
+            while (n === i) n = Math.floor(Math.random() * THINK_LINES.length)
+            return n
+          })
+        }, 3200)
         return () => clearInterval(t)
       }, [quipOn])
 
@@ -748,38 +879,63 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
-      // 开：下一轮由副模型来答（改的是会话的模型选择，不动消息归属）；关：换回原来的
-      const toggleSwap = () => {
-        const next = !swapOn
-        setSwapOn(next)
-        fetch(API + '/swap', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, on: next }),
-        })
-          .then((r) => r.json())
-          .then((j) => {
-            if (j && j.ok) {
-              swap.bySession[sidKey] = !!j.on
-              setSwapOn(!!j.on)
-            } else {
-              setSwapOn(!next)
-            }
-          })
-          .catch(() => setSwapOn(!next))
-      }
-
+      // 1.5.0：主刀不再"点开关直接切模型"，改成"点按钮拉起副输入框、写完回车才主刀"。
+      // 手动拉起才激活主刀；副框缩着 / 被二次评审拉起的都不算。
       const swapChip = () =>
         React.createElement(
           Btn,
           {
             tier: 'sec',
-            onClick: toggleSwap,
+            onClick: () => openLeadComposer(),
             active: swapOn,
-            title: '打开后：下一轮由副模型来答；再点「二次评审」时，由原来的主模型来评。不改消息归属。',
+            title: '点开副输入框，写一句让副模型直接回答（答完自动回主模型）',
           },
-          '副模型主刀' + (swapOn ? '：开' : ''),
+          '副模型主刀' + (swapOn ? '：进行中' : ''),
         )
+
+      /* ---------------- 1.5.0：主刀桥接（副框广播 → 当前会话的 turnTail 执行） ----------------
+         shell.overlay 拿不到 sessionId / inputActions，这里接住副框发来的 requestLead：
+         一次性主刀 —— 切到副模型 → 把内容填进主输入框发出去（副模型答这一轮）→ 稍后切回主模型。
+         只让 activeSid 匹配的那一个会话执行；处理时立刻把请求置空，避免同会话多条回复重复发。 */
+      const lead = useLead()
+      useEffect(() => {
+        leadShared.activeSid = sidKey
+      }, [sidKey])
+
+      useEffect(() => {
+        if (lead.request && sidKey === leadShared.activeSid) {
+          const text = lead.request.text
+          lead.request = null
+          if (text) {
+            const swapTo = (on) =>
+              fetch(API + '/swap', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionId, on }),
+              })
+                .then((r) => r.json())
+                .then((j) => {
+                  if (j && j.ok) {
+                    swap.bySession[sidKey] = !!j.on
+                    setSwapOn(!!j.on)
+                  }
+                })
+                .catch(() => {})
+            // 一次性主刀：切到副模型 → 发出去（副模型答这一轮）→ 稍后切回主模型（下一轮回主模型）
+            swapTo(true).then(() => {
+              try {
+                if (inputActions && typeof inputActions.setDraft === 'function' && typeof inputActions.submit === 'function') {
+                  inputActions.setDraft(text)
+                  inputActions.submit()
+                }
+              } catch (e) {}
+              setTimeout(() => swapTo(false), 800)
+            })
+          }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [lead.request])
+
       /* 1.3.6：这张卡这次花了多少 —— 全从日志和返回里算，不为显示数字多调一次模型。
          复核＝副模型那次（要它真给了用量才显示）；本轮＝主模型这一轮的账（日志里本来就有）。 */
       const fmtTok = (n) => {
@@ -857,11 +1013,12 @@ window.__ModuleLoader__.load({
         })
         // 只评"用户点的这一轮及以前"：把 seq 一起送过去，后端只读到这里为止。
         // 用 POST：评审是要花钱的，不能让别的网页拿 <img>／链接蹭一下。
+        // 1.5.0：带上模式 + "重点看哪儿"提示词（都读全局共享值，避免自动评审拿到过期闭包）
         const url = API + '/review'
         fetch(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: sessionId || '', seq: seq, job, mock: kind === 'mock', auto: kind === 'auto' }),
+          body: JSON.stringify({ sessionId: sessionId || '', seq: seq, job, mock: kind === 'mock', auto: kind === 'auto', mode: modeShared.value, focus: focusShared.value || '' }),
         })
           .then((r) => r.json())
           .then((json) => {
@@ -904,6 +1061,10 @@ window.__ModuleLoader__.load({
                 reviewer: json.reviewer || null,
                 // 1.1.0：引文核验（机器查的）
                 provenance: json.provenance || null,
+                // 1.4.0：这次实际用了哪段"重点看哪儿"提示词（空 = 没指定）
+                focus: json.focusPrompt || '',
+                // 1.5.0：这次走的是哪种模式（builtin / custom），底栏写出来
+                reviewMode: json.reviewMode || 'builtin',
                 // 正在跑的是哪一版（改了没生效时一眼看出来）
                 version: json.version || '',
                 elapsedMs: Number(json.elapsedMs) || 0,
@@ -1607,6 +1768,13 @@ window.__ModuleLoader__.load({
           entry && entry.topic
             ? React.createElement('div', { ref: reveal(40), style: { opacity: 0.6, fontSize: FS.min, marginBottom: 8 } }, '评的是：' + entry.topic)
             : null,
+          entry && entry.focus
+            ? React.createElement(
+                'div',
+                { ref: reveal(40), style: { opacity: 0.6, fontSize: FS.min, marginBottom: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } },
+                '这次重点看：' + entry.focus,
+              )
+            : null,
           React.createElement(Provenance, { pv: entry && entry.provenance }),
           React.createElement(Steps, { steps: (entry && entry.steps) || [] }),
           omittedTotal > 0
@@ -1669,6 +1837,7 @@ window.__ModuleLoader__.load({
                   reviewerRole ? React.createElement('span', null, '· ' + reviewerRole) : null,
                   spentText ? React.createElement('span', null, '· 用了 ' + spentText) : null,
                   entry && entry.version ? React.createElement('span', null, '· v' + entry.version) : null,
+                  entry && entry.reviewMode === 'custom' ? React.createElement('span', null, '· 自定义模式') : null,
                 )
               : null,
             usageChip(entry && entry.usage),
@@ -1693,13 +1862,13 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // 未评：这一排就是"明面"——一个实心主操作，其余全部退成细边
+      // 未评：一个实心主操作，其余退成细边。点「二次评审」拉起副输入框，写完回车才真正评审（1.5.0）
       return React.createElement(
         'div',
         { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: FS.body } },
         React.createElement(
           Btn,
-          { tier: 'pri', onClick: () => startReview('manual'), title: '让 ' + (reviewerName || '副模型') + ' 挑一遍这一轮的毛病' },
+          { tier: 'pri', onClick: () => openComposer({ sessionId, seq }, () => startReview('manual')), title: '让 ' + (reviewerName || '副模型') + ' 挑一遍这一轮的毛病' },
           React.createElement(Mark, { size: 14 }),
           '二次评审',
         ),
@@ -1721,6 +1890,807 @@ window.__ModuleLoader__.load({
             )
           : null,
         fixModal(),
+      )
+    }
+
+    /* ---------------- 1.5.1：副输入框「抽牌」动画层 ----------------
+       他 2026-11-14 要的：副框像一张牌从主框下面被抽出来、展开；在对话区占真实位置；
+       只盖主框上半，下半留出来点得回主框；开合不跳两下；扑克牌的层次和质感，丝滑优雅。
+       做法（交接词 §3 重做动画层，不在 1.5.0 上叠 overlay）：
+         · 单一 rAF 驱动器：占位高度、牌的高度/位移/圆角/阴影、内容淡入、扫光，全由同一个
+           进度值 p 算出 —— 同一段动画、同一个节奏，主框随占位联动，天然不跳；
+         · 测量只一次：开合起点冻结主框矩形与面板自然高度，动画期间不量自己变形后的位置；
+         · 可打断：动画中途再点，从当前 p 平滑反向，不瞬移；
+         · 牌边不消失：同一个容器从牌边大小长到面板大小，视觉上同一张牌；
+         · 评审/主刀逻辑一行不改，只动外层容器和动画。 */
+    const SEC_STYLE_ID = 'second-review-composer-style'
+    function ensureComposerStyle() {
+      if (typeof document === 'undefined' || document.getElementById(SEC_STYLE_ID)) return
+      const st = document.createElement('style')
+      st.id = SEC_STYLE_ID
+      st.textContent = [
+        '[data-sec-card] textarea:focus{border-color:color-mix(in srgb, var(--we-accent, #3b82f6) 55%, transparent)!important;box-shadow:0 0 0 3px color-mix(in srgb, var(--we-accent, #3b82f6) 14%, transparent)}',
+        /* 内容淡入交给合成器过渡：rAF 只负责"点火"一次，收尾不再逐帧写，消除末尾顿挫。
+           只在展开方向启用过渡；收起时关掉，跟手缩回不拖影 */
+        '[data-sec-card][data-sec-dir="open"] [data-sec-content]{transition:opacity .26s cubic-bezier(.33,1,.68,1)}',
+        /* 展开时悬停主框露出的下半：手指＋浮出一行提示小字（1.5.1 交互细节，他点的） */
+        '[data-sec-half-hover]{cursor:pointer!important}',
+        '[data-sec-half-hover] *{cursor:pointer!important}',
+        '[data-sec-card] ::-webkit-scrollbar{width:8px;height:8px}',
+        '[data-sec-card] ::-webkit-scrollbar-thumb{background:rgba(128,128,128,.35);border-radius:4px}',
+        '[data-sec-card] ::-webkit-scrollbar-thumb:hover{background:rgba(128,128,128,.55)}',
+        '[data-sec-card] ::-webkit-scrollbar-track{background:transparent}',
+      ].join('\n')
+      document.head.appendChild(st)
+    }
+
+    /* 缓动：抽牌用"快起慢落"的五次方出缓动，优雅不弹跳；悬停小动作用三次方 */
+    const secEaseOutQuint = (t) => 1 - Math.pow(1 - t, 5)
+    const secEaseOutCubic = (t) => 1 - Math.pow(1 - t, 3)
+    const secClamp01 = (t) => Math.max(0, Math.min(1, t))
+    const secLerp = (a, b, t) => a + (b - a) * t
+
+    /* 纯几何：给定主框矩形 / 面板自然高 / 进度 p(0=牌边,1=展开)，算出这一帧的所有量。
+       抽出来当纯函数，动画测试直接喂数验证，不靠浏览器。
+       占位联动：a=动画起点时占位块的实际高度，b=目标占位高度，q=本段动画进度（与 p 同源）。
+       牌底相对主框**实际顶边**下沉 drop：收起 0、展开半高 —— 只盖上半由此保证。
+       主框实际顶边由 applyFrame 每帧读布局真值（主框不被我们变形，读它不算量自己），
+       所以"主框被顶下去"和"对话被压缩、主框不动"两种宿主布局都正确，不会沉到地下。
+       展开目标占位 b=panelH-cardH/2+8：牌顶恰好停在对话区底＋8px，不盖对话文字。 */
+    function secCardGeometry(pos, panelH, p, hover, a, b, q, cardTop) {
+      const cardH = pos ? pos.height : 76
+      const sheetH = Math.max(18, Math.round(cardH * 0.5))
+      const sOpen = Math.max(sheetH, Math.round(panelH - cardH / 2 + 8))
+      const a0 = a == null ? sheetH : a
+      const b0 = b == null ? sOpen : b
+      const q0 = q == null ? p : q
+      const S = secLerp(a0, b0, q0)
+      /* 宽度回旧版（他 11-14 真机后拍板）：跟主框一样长、左右各留 23，收起/展开同宽 */
+      const W = pos ? Math.max(160, Math.round(pos.width - 46)) : 220
+      const left = pos ? pos.left + 23 : 30
+      /* 牌边是完整牌面：向下多画 tuck=8px（大于悬停上抽量 6），再用 clip-path 裁掉
+         伸进主框的部分——重叠区不绘制，任何宿主层级下都"只看见主框"；悬停上抽时
+         底边仍贴合主框顶，不露裂缝。展开初段裁切随 p 释放，牌像从主框后面升上来。
+         占位按可见高 sheetH 算，tuck 不影响版面。 */
+      const tuck = 8
+      const H = secLerp(sheetH + tuck, panelH, p)
+      const top = cardTop == null ? (pos && pos.top != null ? pos.top : 700) : cardTop
+      /* 牌底沉到主框实际顶边之下多少：收起＝tuck（裁掉不可见）、展开＝半高；面板太矮时少沉一点，
+         保证牌顶不越过对话区底＋8（不盖对话优先）；悬停上抽 6px 只在牌边态 */
+      const dropFull = Math.min(cardH / 2, Math.max(0, panelH - sheetH - 8))
+      const drop = secLerp(tuck, dropFull, p) - (hover ? 6 * (1 - p) : 0)
+      const clip = Math.max(0, drop) * (1 - secClamp01(p / 0.15))
+      const radius = secLerp(14, 16, p)
+      const contentOp = p >= 1 ? 1 : secClamp01((p - 0.55) / 0.45)
+      const labelOp = p <= 0 ? 1 : secClamp01(1 - p / 0.3)
+      const shineX = secLerp(-130, 260, secClamp01((p - 0.12) / 0.8))
+      /* 扫光用正弦包络：起止都平滑归零，不在收尾处突然切断（消除末尾顿挫） */
+      const shineOp = 0.9 * Math.sin(Math.PI * secClamp01((p - 0.12) / 0.88))
+      const lift = p * 26
+      const shadow =
+        '0 ' + (8 + lift) + 'px ' + (18 + lift * 1.6) + 'px rgba(0,0,0,' + (0.3 + 0.18 * p) + '), ' +
+        '0 1px 0 rgba(255,255,255,' + (0.1 + 0.06 * p) + ') inset'
+      return { sheetH, sOpen, space: S, W, left, H, top, drop, clip, radius, contentOp, labelOp, shineX, shineOp, shadow }
+    }
+
+    function ComposerOverlay() {
+      const [mode, setMode] = useMode()
+      const [focus, setFocus] = useFocus()
+      const comp = useComposer()
+      const [pos, setPos] = useState(null)
+      const [dark] = useState(isDarkUI())
+      const [leadText, setLeadText] = useState('')
+      const [entryHover, setEntryHover] = useState(false)
+      const cardRef = React.useRef(null)
+      const contentRef = React.useRef(null)
+      const labelRef = React.useRef(null)
+      const shineRef = React.useRef(null)
+      const inputRef = React.useRef(null)
+      const spaceRef = React.useRef(null)
+      const animRef = React.useRef(null)
+      const geoRef = React.useRef(null)
+      const hoverRef = React.useRef(false)
+      const hoverAnimRef = React.useRef(0)
+      const contentOnRef = React.useRef(false)
+      /* 副框里的模型条（1.5.1）：复用设置页 01 段的两个下拉，选择即保存 */
+      const [mcfg, setMcfg] = useState(null)
+      const [mproviders, setMproviders] = useState([])
+      const [mmodels, setMmodels] = useState([])
+      const [mresolved, setMresolved] = useState('')
+
+      /* 拉起副框时：点副框外任意处 / 点回主输入框 / 按 Esc 都收起来 */
+      useEffect(() => {
+        if (!comp.open) return
+        const onFocusIn = (e) => {
+          const t = e.target
+          if (t && t.closest && t.closest('[data-composer-card]')) closeComposer()
+        }
+        const onKey = (e) => {
+          if (e.key === 'Escape') closeComposer()
+        }
+        /* 点外部收起用 pointerdown 不用 click：原生下拉的系统弹层不派发 document 的
+           click，pointerdown 才收得到；副框内部与主框本身不算外部（主框另有归路）。 */
+        const onPointerDown = (e) => {
+          const t = e.target
+          if (!t || !t.closest) return
+          if (t.closest('[data-sec-card]') || t.closest('[data-composer-card]') || t.closest('[data-sec-half-tip]')) return
+          closeComposer()
+        }
+        document.addEventListener('focusin', onFocusIn, true)
+        document.addEventListener('keydown', onKey, true)
+        document.addEventListener('pointerdown', onPointerDown, true)
+        return () => {
+          document.removeEventListener('focusin', onFocusIn, true)
+          document.removeEventListener('keydown', onKey, true)
+          document.removeEventListener('pointerdown', onPointerDown, true)
+        }
+      }, [comp.open])
+
+      /* 展开时主框露出的下半：指针变手指＋浮出一行「点击切回主输入框」。
+         只在自己的元素上加属性/临时 fixed 小条，不搬动 React 管理的节点。 */
+      useEffect(() => {
+        if (!comp.open) return
+        const host = document.querySelector('[data-composer-card]')
+        if (!host) return
+        host.setAttribute('data-sec-half-hover', '')
+        const tip = document.createElement('div')
+        tip.setAttribute('data-sec-half-tip', '')
+        tip.textContent = '点击切回主输入框'
+        const d = isDarkUI()
+        tip.style.cssText =
+          /* 必须高于主框所在的层叠上下文，否则会被主框背景整块挡住（实测过）；
+             不靠层级防遮挡——落位被夹在主框露出的下半带里，见 place() */
+          'position:fixed;z-index:9991;pointer-events:none;white-space:nowrap;' +
+          'padding:4px 10px;border-radius:8px;font-size:12px;line-height:1.4;' +
+          'letter-spacing:.02em;opacity:0;transform:translateY(3px);' +
+          'transition:opacity .16s ease,transform .16s cubic-bezier(.33,1,.68,1);' +
+          'color:' + (d ? '#f3f3f3' : '#151515') + ';' +
+          'background:' + (d ? 'rgba(28,29,34,0.96)' : 'rgba(252,252,253,0.98)') + ';' +
+          'border:1px solid ' + (d ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.12)') + ';' +
+          'box-shadow:0 8px 22px rgba(0,0,0,' + (d ? '0.42' : '0.16') + ');' +
+          'backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);'
+        /* 挂到副框同一个父节点：与牌共享层叠上下文，z 序才可比；
+           父节点由 React 管，只在末尾追加自己的临时节点，不搬动它的子节点。 */
+        const mount = (cardRef.current && cardRef.current.parentElement) || document.body
+        mount.appendChild(tip)
+        let shown = false
+        let raf = 0
+        let last = null
+        /* 每帧按**实时**矩形重新夹取：占位撑开/滚动/缩放导致布局后移时自愈，
+           不会留在旧坐标上爬到面板上去（一次性算位实测会错位）。 */
+        const layout = () => {
+          if (!last) return
+          const r = host.getBoundingClientRect()
+          const w = tip.offsetWidth || 132
+          const h = tip.offsetHeight || 26
+          const panelBottom = cardRef.current ? cardRef.current.getBoundingClientRect().bottom : r.top + r.height / 2
+          const bandTop = Math.max(r.top + r.height / 2, panelBottom) + 4
+          const bandBottom = r.bottom - 4
+          let y = last.y + 18
+          if (bandBottom - bandTop >= h) y = Math.max(bandTop, Math.min(y, bandBottom - h))
+          else y = Math.min(r.bottom + 6, window.innerHeight - h - 8)
+          const x = Math.max(r.left + 4, Math.min(last.x + 14, Math.min(r.right - w - 4, window.innerWidth - w - 10)))
+          tip.style.left = x + 'px'
+          tip.style.top = Math.max(8, y) + 'px'
+        }
+        const loop = () => {
+          if (!shown) { raf = 0; return }
+          layout()
+          raf = requestAnimationFrame(loop)
+        }
+        const hide = () => {
+          shown = false
+          last = null
+          if (raf) { cancelAnimationFrame(raf); raf = 0 }
+          tip.style.opacity = '0'
+          tip.style.transform = 'translateY(3px)'
+        }
+        const place = (e) => {
+          const r = host.getBoundingClientRect()
+          /* 只在露出的下半区提示：上半被副框盖着，不该抢它的悬停 */
+          if (e.clientY < r.top + r.height / 2 - 1) { if (shown) hide(); return }
+          last = { x: e.clientX, y: e.clientY }
+          layout()
+          if (!shown) {
+            shown = true
+            tip.style.opacity = '1'
+            tip.style.transform = 'translateY(0)'
+            if (!raf) raf = requestAnimationFrame(loop)
+          }
+        }
+        host.addEventListener('pointermove', place)
+        host.addEventListener('pointerleave', hide)
+        host.addEventListener('pointerdown', hide)
+        return () => {
+          host.removeEventListener('pointermove', place)
+          host.removeEventListener('pointerleave', hide)
+          host.removeEventListener('pointerdown', hide)
+          if (raf) cancelAnimationFrame(raf)
+          host.removeAttribute('data-sec-half-hover')
+          tip.remove()
+        }
+      }, [comp.open])
+
+      /* 拉起就聚焦到副框的输入区，直接能打字 */
+      useEffect(() => {
+        if (!comp.open) return
+        const t = setTimeout(() => {
+          try {
+            if (inputRef.current) inputRef.current.focus()
+          } catch {}
+        }, 60)
+        return () => clearTimeout(t)
+      }, [comp.open])
+
+      useEffect(() => {
+        ensureComposerStyle()
+      }, [])
+
+      // 挂载时：从 config 读上次的模式 + 提示词（用户没动过才灌，别覆盖他正在写的）
+      useEffect(() => {
+        loadSettings().then((v) => {
+          if (!v) return
+          if (!modeShared.touched && typeof v.reviewMode === 'string') {
+            modeShared.value = v.reviewMode === 'custom' ? 'custom' : 'builtin'
+            modeShared.listeners.forEach((l) => l())
+          }
+          if (!focusShared.touched && typeof v.focusPrompt === 'string' && v.focusPrompt) {
+            focusShared.value = v.focusPrompt
+            focusShared.listeners.forEach((l) => l())
+          }
+        })
+      }, [])
+
+      /* 锚定 [data-composer-card]。动画期间冻结测量（不量自己变形后的位置）；
+         位置真变了（窗口缩放等）才重算，且只更新几何基准，不打断动画。
+         锚不到主输入框（插件页 / 设置页 / 页面切换中）就整块收掉：副框只在主对话页存在，
+         否则它会在 overlay 插槽里按静态位置画出来——2026-11-14 他截图的那个 bug。 */
+      useEffect(() => {
+        const hide = () => {
+          if (animRef.current) animRef.current.running = false
+          if (composerShared.open) closeComposer()
+          setPos(null)
+        }
+        const recalc = () => {
+          const el = document.querySelector('[data-composer-card]')
+          if (!el) { hide(); return }
+          if (animRef.current && animRef.current.running) return
+          const r = el.getBoundingClientRect()
+          if (r.width < 10 || r.height < 10) { hide(); return }
+          const next = { left: r.left, top: r.top, width: r.width, height: r.height, bottom: window.innerHeight - r.top + 8, edge: window.innerHeight - r.bottom }
+          setPos((p) =>
+            p &&
+            Math.abs(p.left - next.left) < 0.5 &&
+            Math.abs((p.top || 0) - next.top) < 0.5 &&
+            Math.abs(p.width - next.width) < 0.5 &&
+            Math.abs((p.height || 0) - next.height) < 0.5 &&
+            Math.abs(p.bottom - next.bottom) < 0.5 &&
+            Math.abs((p.edge || 0) - next.edge) < 0.5
+              ? p
+              : next,
+          )
+        }
+        recalc()
+        /* 页面切换（点侧栏 / 换会话）时尽快收掉，不等下一个心跳；
+           点击后 80ms 再量——那一刻 React 已经换完页。 */
+        let nav = 0
+        const afterNav = () => {
+          if (nav) return
+          nav = setTimeout(() => { nav = 0; recalc() }, 80)
+        }
+        window.addEventListener('resize', recalc)
+        window.addEventListener('scroll', recalc, true)
+        document.addEventListener('pointerdown', afterNav, true)
+        const t = setInterval(recalc, 250)
+        return () => {
+          window.removeEventListener('resize', recalc)
+          window.removeEventListener('scroll', recalc, true)
+          document.removeEventListener('pointerdown', afterNav, true)
+          if (nav) clearTimeout(nav)
+          clearInterval(t)
+        }
+      }, [])
+
+      /* 占位块：插在主框前面，只插一次、只由动画驱动器写高度。
+         宿主容器不是纵向 flex/grid 就不插，退回悬浮（宁可不占位，也不能把版面弄乱）。 */
+      useEffect(() => {
+        if (typeof document === 'undefined' || !pos) return
+        const card = document.querySelector('[data-composer-card]')
+        const parent = card && card.parentElement
+        if (!parent) return
+        const cs = getComputedStyle(parent)
+        const column = (cs.display.includes('flex') && String(cs.flexDirection).startsWith('column')) || cs.display.includes('grid')
+        if (!column) return
+        const space = document.createElement('div')
+        space.setAttribute('data-sec-space', '')
+        space.style.cssText = 'height:0px;pointer-events:none;flex:0 0 auto;overflow:hidden;'
+        try {
+          parent.insertBefore(space, card)
+        } catch {
+          return
+        }
+        spaceRef.current = space
+        return () => {
+          space.remove()
+          spaceRef.current = null
+        }
+      }, [pos])
+
+      /* 把一帧的几何量写进 DOM（牌容器 / 内容 / 牌边小字 / 扫光 / 占位）。
+         单驱动器调用，无竞争；内容层在不可见时不吃点击（牌边态要点得到）。 */
+      const applyFrame = (g, p) => {
+        /* 先写占位，再读主框布局真值（它不被我们变形）：同一帧内联动，无滞后 */
+        if (spaceRef.current) spaceRef.current.style.height = Math.round(g.space) + 'px'
+        const card = cardRef.current
+        if (card) {
+          /* 首帧由样式表藏着，等几何量写进来才露面 —— 否则会在静态位置闪一下没位置的牌 */
+          card.style.visibility = 'visible'
+          const host = document.querySelector('[data-composer-card]')
+          const top = host ? host.getBoundingClientRect().top : g.top
+          card.style.left = g.left + 'px'
+          card.style.width = g.W + 'px'
+          card.style.height = g.H + 'px'
+          card.style.top = top + g.drop - g.H + 'px'
+          /* 收起时牌在主框下一层＋重叠区裁掉：只看见主框；拉起才升上来 */
+          card.style.zIndex = p > 0.02 ? 9990 : 9989
+          card.style.clipPath = g.clip > 0.5 ? 'inset(0px 0px ' + g.clip + 'px 0px)' : 'none'
+          card.style.borderRadius = g.radius + 'px ' + g.radius + 'px ' + (p > 0.5 ? g.radius : 0) + 'px ' + (p > 0.5 ? g.radius : 0) + 'px'
+          card.style.boxShadow = g.shadow
+        }
+        if (contentRef.current) {
+          /* 淡入只点火一次，之后由 CSS 过渡跑完；反向/瞬移才直接写值 */
+          const el = contentRef.current
+          if (g.contentOp >= 1) {
+            if (!contentOnRef.current) {
+              contentOnRef.current = true
+              el.style.opacity = '1'
+            }
+          } else {
+            contentOnRef.current = false
+            el.style.opacity = String(g.contentOp)
+          }
+          el.style.pointerEvents = g.contentOp > 0.5 ? 'auto' : 'none'
+        }
+        if (labelRef.current) labelRef.current.style.opacity = g.labelOp * (hoverRef.current ? 0.95 : 0.72)
+        if (shineRef.current) {
+          shineRef.current.style.opacity = g.shineOp
+          shineRef.current.style.transform = 'translateX(' + g.shineX + '%) skewX(-18deg)'
+        }
+      }
+
+      /* 单一动画驱动器：从当前 p 平滑走到目标（0/1），可中途反向。
+         起点冻结：面板自然高（量一次）、占位起点 a、占位目标 b；全程纯函数算帧。 */
+      const startAnim = (target) => {
+        const reduce = quietMotion()
+        const from = animRef.current ? animRef.current.p : 0
+        /* 方向标在容器上：展开才启用内容淡入过渡，收起跟手不拖影 */
+        if (cardRef.current) cardRef.current.setAttribute('data-sec-dir', target === 1 ? 'open' : 'close')
+        const panelH0 = geoRef.current ? geoRef.current.panelH : 240
+        const a = spaceRef.current ? parseFloat(spaceRef.current.style.height) || 0 : 0
+        if (reduce || Math.abs(target - from) < 0.001) {
+          const gImm = secCardGeometry(pos, panelH0, target, false)
+          applyFrame(secCardGeometry(pos, panelH0, target, false, a, target === 1 ? gImm.sOpen : gImm.sheetH, 1), target)
+          animRef.current = { p: target, running: false }
+          return
+        }
+        /* 量一次面板自然高度：内容层临时改回文档流读高，读完立刻恢复绝对定位 */
+        let panelH = panelH0
+        const content = contentRef.current
+        if (content && target === 1) {
+          const prevPos = content.style.position
+          const prevInset = content.style.inset
+          const prevOverflow = content.style.overflow
+          content.style.position = 'relative'
+          content.style.inset = 'auto'
+          content.style.overflow = 'visible'
+          panelH = Math.min(Math.max(content.scrollHeight + 2, 150), Math.round(window.innerHeight * 0.64))
+          content.style.position = prevPos
+          content.style.inset = prevInset
+          content.style.overflow = prevOverflow
+        }
+        geoRef.current = { panelH }
+        const g0 = secCardGeometry(pos, panelH, from, false)
+        const b = target === 1 ? g0.sOpen : g0.sheetH
+        const dur = target === 1 ? 460 : 380
+        const t0 = performance.now()
+        const state = { p: from, running: true }
+        animRef.current = state
+        const tick = (now) => {
+          if (animRef.current !== state) return
+          const t = secClamp01((now - t0) / dur)
+          const q = secEaseOutQuint(t)
+          const p = secLerp(from, target, q)
+          state.p = p
+          applyFrame(secCardGeometry(pos, panelH, p, hoverRef.current && p < 0.05, a, b, q), p)
+          if (t < 1) requestAnimationFrame(tick)
+          else state.running = false
+        }
+        requestAnimationFrame(tick)
+      }
+
+      /* 开合状态变化 → 驱动动画。挂载时先把牌边摆好（p=0）。 */
+      useEffect(() => {
+        if (!pos) return
+        if (!animRef.current) {
+          geoRef.current = { panelH: 240 }
+          applyFrame(secCardGeometry(pos, 240, 0, false), 0)
+          animRef.current = { p: 0, running: false }
+        }
+        startAnim(comp.open ? 1 : 0)
+      }, [comp.open, pos])
+
+      /* 悬停上抽：牌边态鼠标进出，6px 小位移也走缓动，不瞬移。
+         主驱动器在跑时不插手，避免两个驱动器写同一帧。 */
+      useEffect(() => {
+        if (comp.open || !pos) return
+        if (animRef.current && animRef.current.running) return
+        const from = hoverAnimRef.current
+        const to = entryHover ? 1 : 0
+        if (Math.abs(to - from) < 0.001) return
+        const paint = (h) => {
+          const a = spaceRef.current ? parseFloat(spaceRef.current.style.height) || 0 : 0
+          const gH = secCardGeometry(pos, geoRef.current ? geoRef.current.panelH : 240, 0, h)
+          applyFrame(secCardGeometry(pos, geoRef.current ? geoRef.current.panelH : 240, 0, h, a, gH.sheetH, 1), 0)
+        }
+        if (quietMotion()) {
+          hoverAnimRef.current = to
+          paint(to)
+          return
+        }
+        const t0 = performance.now()
+        const tick = (now) => {
+          if (animRef.current && animRef.current.running) return
+          const t = secClamp01((now - t0) / 180)
+          const h = secLerp(from, to, secEaseOutCubic(t))
+          hoverAnimRef.current = h
+          paint(h)
+          if (t < 1) requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      }, [entryHover, comp.open, pos])
+
+      /* 卸载时停驱动器 */
+      useEffect(() => () => { if (animRef.current) animRef.current.running = false }, [])
+
+      /* 模型条数据：拉起时读配置＋供应商清单；供应商变化时拉模型清单（alive flag 防竞态） */
+      useEffect(() => {
+        if (!comp.open) return
+        let alive = true
+        loadSettings(true).then((v) => {
+          if (!alive) return
+          setMcfg(v || {})
+          setMresolved(settings.resolved || '')
+        })
+        fetch(API + '/models')
+          .then((r) => r.json())
+          .then((j) => { if (alive && j && j.ok) setMproviders(j.providers || []) })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [comp.open])
+      const mprovider = mcfg && mcfg.provider
+      useEffect(() => {
+        if (!comp.open || !mprovider) return
+        let alive = true
+        fetch(API + '/models?provider=' + encodeURIComponent(mprovider))
+          .then((r) => r.json())
+          .then((j) => { if (alive && j && j.ok) setMmodels(j.models || []) })
+          .catch(() => { if (alive) setMmodels([]) })
+        return () => { alive = false }
+      }, [comp.open, mprovider])
+      /* 选择即保存（副框里没有"保存"按钮，不能让他选了不生效） */
+      const saveModelPatch = (patch) => {
+        setMcfg((c) => ({ ...(c || {}), ...patch }))
+        fetch(API + '/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })
+          .then((r) => r.json())
+          .then((j) => {
+            if (j && j.ok) {
+              settings.value = j.config
+              setMcfg(j.config)
+              setMresolved(j.resolvedModel || '')
+            }
+          })
+          .catch(() => {})
+      }
+
+      /* 副框只在主对话页存在：锚不到主输入框就整块不渲染（插件页 / 设置页 / 切换中）。
+         只藏不卸载，回对话页量到几何就自己回来。 */
+      if (!pos) return null
+
+      const custom = mode === 'custom'
+      const isLead = comp.purpose === 'lead'
+      const empty = custom && !focus.trim()
+      const leadEmpty = isLead && !leadText.trim()
+
+      const submit = () => {
+        if (isLead) {
+          if (leadEmpty) return
+          requestLead(leadText) // 切到副模型 + 把内容发出去（副模型答）
+          setLeadText('')
+          closeComposer()
+          return
+        }
+        if (empty) return
+        const fn = comp.submitFn
+        closeComposer()
+        if (fn) fn()
+      }
+      const changeMode = (m) => {
+        setMode(m)
+        saveConfig({ reviewMode: m })
+      }
+      const changeFocus = (v) => {
+        setFocus(v)
+        saveConfig({ focusPrompt: v })
+      }
+
+      const fg = dark ? '#f3f3f3' : '#151515'
+      const sub = dark ? 'rgba(243,243,243,0.55)' : 'rgba(17,17,17,0.55)'
+      const line = dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.12)'
+      const accent = 'var(--we-accent, #3b82f6)'
+
+      /* 扑克牌牌面：有厚度的纸，深/浅两套；顶部一道高光、底部一条纸边 */
+      const cardFace = dark
+        ? 'linear-gradient(157deg, #2e3037 0%, #1d1e23 52%, #131417 100%)'
+        : 'linear-gradient(157deg, #ffffff 0%, #f3f4f7 55%, #e7e9ee 100%)'
+      const cardEdge = dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)'
+
+      const modeBtn = (m, label) =>
+        React.createElement(
+          Chip,
+          {
+            onClick: () => changeMode(m),
+            active: mode === m,
+            title: m === 'builtin' ? '使用插件内置评审规则，附加提示词仅用于指定复核重点' : '自定义提示词作为最高评审准则（必填）',
+            style: { fontSize: FS.min, fontWeight: mode === m ? 600 : 400 },
+          },
+          label,
+        )
+
+      /* 模型条选项归一化（/models 给对象，不能当文字渲染，0.6.2 的教训） */
+      const mProviderOptions = (mproviders.length ? mproviders : [{ id: (mcfg && mcfg.provider) || '', name: (mcfg && mcfg.provider) || '' }])
+        .map((p) => (typeof p === 'string' ? { id: p, name: p } : { id: String((p && p.id) || ''), name: String((p && p.name) || (p && p.id) || '') }))
+        .filter((p) => p.id)
+      const mModelOptions = mmodels
+        .map((m) => (typeof m === 'string' ? { id: m, name: m } : { id: String((m && m.id) || ''), name: String((m && m.name) || (m && m.id) || '') }))
+        .filter((m) => m.id)
+      const mCurrentName = mcfg && mcfg.modelAuto === false ? (mcfg.model || '未选') : (mresolved || 'Pro 档')
+
+      /* 同一个容器＝同一张牌：牌边态是它的缩略，展开态是它的完整。
+         初始样式由 applyFrame 在挂载时写入；这里只给静态的牌面质感。 */
+      return React.createElement(
+        'div',
+        {
+          ref: cardRef,
+          'data-sec-card': '',
+          /* 点击只在牌边态生效；展开态不挂 onClick（DSH 里裸容器 onClick 会吞掉内部按钮的点击，× 关不掉就是这么来的） */
+          onClick: comp.open ? undefined : () => openLeadComposer(),
+          onMouseEnter: () => { hoverRef.current = true; setEntryHover(true) },
+          onMouseLeave: () => { hoverRef.current = false; setEntryHover(false) },
+          title: comp.open ? undefined : '拉起副输入框，输入内容后由副模型作答',
+          style: {
+            position: 'fixed',
+            zIndex: 9989,
+            /* 量到主框几何之前不露面（见 applyFrame）；副框只在主对话页存在 */
+            visibility: 'hidden',
+            boxSizing: 'border-box',
+            background: cardFace,
+            border: '1px solid ' + cardEdge,
+            color: fg,
+            overflow: 'hidden',
+            cursor: comp.open ? 'default' : 'pointer',
+            userSelect: 'none',
+            willChange: 'height, bottom',
+            maxHeight: '64vh',
+          },
+        },
+        /* 牌顶一道纸边高光：扑克牌的厚度感 */
+        React.createElement('div', {
+          style: {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 2,
+            background: dark
+              ? 'linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.22), rgba(255,255,255,0))'
+              : 'linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.9), rgba(255,255,255,0))',
+            pointerEvents: 'none',
+          },
+        }),
+        /* 牌边小字（收起态可见，展开淡出） */
+        React.createElement(
+          'div',
+          {
+            ref: labelRef,
+            style: {
+              position: 'absolute',
+              left: 14,
+              right: 14,
+              top: 0,
+              bottom: 0,
+              display: 'flex',
+              alignItems: 'center',
+              fontSize: FS.min,
+              lineHeight: 1.2,
+              letterSpacing: '0.02em',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              pointerEvents: 'none',
+            },
+          },
+          '点击输入指令，Enter 交由副模型作答',
+        ),
+        /* 牌面扫光（展开时一次性掠过） */
+        React.createElement('div', {
+          ref: shineRef,
+          style: {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '42%',
+            height: '100%',
+            background: 'linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.10), rgba(255,255,255,0))',
+            opacity: 0,
+            pointerEvents: 'none',
+          },
+        }),
+        /* 完整面板内容（晚淡入，第一帧不读压扁的字） */
+        React.createElement(
+          'div',
+          {
+            ref: contentRef,
+            'data-sec-content': '',
+            /* 内容层自己挡冒泡：内部交互不传到牌容器，× / 模式 / 预设才点得动 */
+            onClick: (e) => e.stopPropagation(),
+            style: {
+              position: 'absolute',
+              inset: 0,
+              boxSizing: 'border-box',
+              padding: '12px 14px',
+              opacity: 0,
+              overflow: 'auto',
+              fontSize: FS.body,
+            },
+          },
+          // 顶部：标题行 + 关闭
+          React.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } },
+            React.createElement('span', { style: { fontSize: FS.min, opacity: 0.5, marginRight: 2 } }, isLead ? '副模型作答' : '独立复核'),
+            /* 占位撑开，× 钉在右上角 */
+            React.createElement('span', { style: { flex: 1, minWidth: 6 } }),
+            isLead
+              ? React.createElement('span', { style: { fontSize: FS.min, opacity: 0.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, '发送后切换至副模型，作答完成自动切回主模型')
+              : React.createElement(
+                  React.Fragment,
+                  null,
+                  modeBtn('builtin', '评审模式'),
+                  modeBtn('custom', '提示词自定义'),
+                ),
+            React.createElement(
+              Chip,
+              {
+                onClick: (e) => {
+                  if (e && e.stopPropagation) e.stopPropagation()
+                  closeComposer()
+                },
+                title: '收起副输入框（Esc）',
+                style: { fontSize: FS.min, opacity: 0.6 },
+              },
+              '×',
+            ),
+          ),
+          // 输入框
+          React.createElement('textarea', {
+            ref: inputRef,
+            value: isLead ? leadText : focus,
+            rows: 2,
+            placeholder: isLead ? '输入任务或问题，Enter 发送至副模型' : custom ? '输入自定义评审准则（必填，作为最高评审准则）' : '指定复核重点（可选）',
+            onChange: (e) => (isLead ? setLeadText(e.target.value) : changeFocus(e.target.value)),
+            onKeyDown: (e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submit()
+              }
+            },
+            style: {
+              width: '100%',
+              boxSizing: 'border-box',
+              padding: '8px 10px',
+              borderRadius: 10,
+              border: '1px solid ' + line,
+              background: dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+              color: fg,
+              fontSize: FS.small,
+              lineHeight: 1.6,
+              fontFamily: 'inherit',
+              resize: 'vertical',
+              outline: 'none',
+              minHeight: 42,
+            },
+          }),
+          // 模型条（1.5.1，他真机后加的）：独立一条，两个下拉＝设置页 01 段同款，选择即保存；
+          // 右侧展示当前实际使用的副模型（他画的那两个框的位置）
+          React.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
+            React.createElement('span', { style: { fontSize: FS.min, opacity: 0.55, flex: 'none' } }, '副模型'),
+            React.createElement(
+              Select,
+              {
+                value: (mcfg && mcfg.provider) || '',
+                onChange: (e) => saveModelPatch({ provider: e.target.value, model: '', modelAuto: true }),
+              },
+              ...mProviderOptions.map((p) =>
+                React.createElement('option', { key: p.id, value: p.id }, p.name === p.id ? p.id : p.name + '（' + p.id + '）'),
+              ),
+            ),
+            React.createElement(
+              Select,
+              {
+                value: mcfg && mcfg.modelAuto === false ? mcfg.model || '' : '__auto__',
+                onChange: (e) => {
+                  const v = e.target.value
+                  if (v === '__auto__') saveModelPatch({ modelAuto: true })
+                  else saveModelPatch({ model: v, modelAuto: false })
+                },
+              },
+              React.createElement('option', { key: '__auto__', value: '__auto__' }, '自动：Pro 档'),
+              mcfg && mcfg.modelAuto === false && mcfg.model ? null : React.createElement('option', { key: '__none', value: '' }, '（手动选一个）'),
+              ...mModelOptions.map((m) =>
+                React.createElement('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? m.name + '（' + m.id + '）' : m.id),
+              ),
+            ),
+            React.createElement(
+              'span',
+              { style: { fontSize: FS.min, opacity: 0.45, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 180 }, title: '当前副模型：' + mCurrentName },
+              '当前：' + mCurrentName,
+            ),
+          ),
+          // 预设（仅评审态）＋发送：独立一条，发送按钮靠右，不被模型条挤到换行
+          React.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
+            ...(isLead
+              ? []
+              : FOCUS_PRESETS.map((p) =>
+                  React.createElement(
+                    Chip,
+                    { key: p.key, onClick: () => changeFocus(p.text), title: p.text, style: { fontSize: FS.min } },
+                    p.label,
+                  ),
+                )),
+            React.createElement('span', { style: { flex: 1, minWidth: 6 } }),
+            empty || leadEmpty
+              ? React.createElement('span', { style: { fontSize: FS.min, color: sub, opacity: 0.8 } }, isLead ? '请输入内容后发送' : '自定义模式需先输入评审准则')
+              : null,
+            React.createElement(
+              Chip,
+              {
+                onClick: submit,
+                disabled: empty || leadEmpty,
+                title: isLead
+                  ? '切换至副模型并发送当前内容'
+                  : empty
+                    ? '自定义模式需先输入评审准则'
+                    : custom
+                      ? '按自定义准则复核本轮（调用副模型）'
+                      : '复核本轮（调用副模型）',
+                solid: true,
+                style: {
+                  height: 30,
+                  padding: '0 14px',
+                  fontSize: FS.small,
+                  fontWeight: 600,
+                  background: empty || leadEmpty ? undefined : 'color-mix(in srgb, ' + accent + ' 18%, transparent)',
+                  borderColor: empty || leadEmpty ? line : 'color-mix(in srgb, ' + accent + ' 55%, transparent)',
+                },
+              },
+              isLead ? '发送至副模型' : empty ? '待输入' : custom ? '按此准则复核' : '开始复核',
+            ),
+          ),
+        ),
       )
     }
 
@@ -1808,6 +2778,21 @@ window.__ModuleLoader__.load({
       const [note, setNote] = useState('')
       const [busy, setBusy] = useState(false)
       const [ver, setVer] = useState('')
+      /* 1.5.4：更新提示。npm 是拉取式的，装过的人不会自动拿到新版——
+         这里主动问一次宿主（宿主去问 registry），只在「关于」里说一句，不弹窗、不打扰。 */
+      const [upd, setUpd] = useState(null)
+      const [updBusy, setUpdBusy] = useState(false)
+      const checkUpd = (force) => {
+        setUpdBusy(true)
+        fetch(API + '/update' + (force ? '?force=1' : ''))
+          .then((r) => r.json())
+          .then((j) => setUpd(j || { ok: false }))
+          .catch((e) => setUpd({ ok: false, error: String((e && e.message) || e) }))
+          .finally(() => setUpdBusy(false))
+      }
+      useEffect(() => {
+        checkUpd(false)
+      }, [])
 
       useEffect(() => {
         fetch(API + '/config')
@@ -2111,6 +3096,49 @@ window.__ModuleLoader__.load({
           ),
           React.createElement(
             'div',
+            {
+              style: {
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 6,
+                flexWrap: 'wrap',
+                fontSize: FS.small,
+              },
+            },
+            React.createElement('span', { style: { opacity: 0.6 } }, '更新'),
+            upd && upd.hasUpdate
+              ? React.createElement(
+                  'span',
+                  { style: { color: ACCENT, fontWeight: 600 } },
+                  '有新版本 v' + upd.latest + '（现在 v' + upd.current + '）',
+                )
+              : React.createElement(
+                  'span',
+                  { style: { opacity: 0.55 } },
+                  updBusy
+                    ? '在查…'
+                    : upd && upd.latest
+                      ? '已是最新（v' + upd.current + '）'
+                      : upd && upd.error
+                        ? '查不到（' + String(upd.error).slice(0, 40) + '）'
+                        : '还没查',
+                ),
+            React.createElement(
+              Chip,
+              { onClick: () => checkUpd(true), title: '去 npm 问一次最新版本（不装、不改东西）', style: { height: 24, fontSize: FS.min } },
+              updBusy ? '查询中' : '检查更新',
+            ),
+            upd && upd.hasUpdate
+              ? React.createElement(
+                  'span',
+                  { style: { opacity: 0.5, fontSize: FS.min } },
+                  '装新版：插件页对它点「更新」，或者在终端 npm i dsh-second-review@latest',
+                )
+              : null,
+          ),
+          React.createElement(
+            'div',
             { style: { opacity: 0.6, fontSize: FS.small, lineHeight: 1.8 } },
             '评审只写卡片，不改消息、不动会话记录；结果另存一份在 工作区\\二次评审\\。',
             React.createElement('br'),
@@ -2219,6 +3247,13 @@ window.__ModuleLoader__.load({
                   React.createElement(ConfigPage, { view: 'page', ...(props || {}) }),
                 ),
               ),
+          )
+        })
+
+        // 1.5.0：副输入框浮条，挂在 shell.overlay（吸在 [data-composer-card] 上方）。
+        guard('shell.overlay', () => {
+          slots.register({ name: 'shell.overlay', id: 'second-review-composer', order: 50 }, () =>
+            React.createElement(PageBoundary, null, React.createElement(ComposerOverlay)),
           )
         })
       },

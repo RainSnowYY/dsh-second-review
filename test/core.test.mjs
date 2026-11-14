@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(ROOT, '记忆卡', '00-核心记忆卡.md'), '私人�
 fs.writeFileSync(path.join(ROOT, '普通文档.md'), '公开的')
 
 const mod = await import(new URL('../index.js', import.meta.url).href)
-const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, sameModel, turnOf, usageOfTurn, turnTouched, usageOfFinish, sumUsage, pickProModel, resolveReviewModel, READ_TOOLS, WRITE_TOOL } = mod
+const { parseReview, sanitizeReview, blockedPath, clipTranscript, transcriptOf, toolsFor, runTool, saveReview, shouldNudge, streamWithRetry, verifyUserQuotes, sameModel, turnOf, usageOfTurn, turnTouched, usageOfFinish, sumUsage, pickProModel, resolveReviewModel, cmpVersion, READ_TOOLS, WRITE_TOOL } = mod
 
 test.after(() => {
   try {
@@ -154,6 +154,51 @@ test('执行层的第二道门：开关关着时，write_file 就算被调用也
   assert.equal(fs.readFileSync(path.join(ROOT, '记忆卡', '00-核心记忆卡.md'), 'utf8'), '私人的')
 
   fs.rmSync(target, { force: true })
+})
+
+/* ---------------- 1.5.3：大文件 / 原子写（第二轮评审的 P2） ---------------- */
+
+test('read_file 先看大小：超过 4MB 直接拒，不整份读进内存', () => {
+  const big = path.join(ROOT, '大日志.log')
+  fs.writeFileSync(big, 'x'.repeat(4 * 1024 * 1024 + 16), 'utf8')
+  const r = runTool(ROOT, 'read_file', { path: '大日志.log' }, false)
+  assert.equal(r.isError, true)
+  assert.ok(String(r.text).includes('4 MB'), '要说清是大小上限：' + r.text)
+  fs.rmSync(big, { force: true })
+})
+
+test('read_file 拒二进制（不去把 NUL 解码成一堆乱码）', () => {
+  const bin = path.join(ROOT, '图片.png')
+  fs.writeFileSync(bin, Buffer.from([0x89, 0x50, 0x00, 0x4e, 0x47, 0x00, 0x01, 0x02]))
+  const r = runTool(ROOT, 'read_file', { path: '图片.png' }, false)
+  assert.equal(r.isError, true)
+  assert.ok(String(r.text).includes('二进制'), '要说清是二进制：' + r.text)
+  fs.rmSync(bin, { force: true })
+})
+
+test('write_file 是原子写：写成功没有残留临时文件，内容读回来一模一样', () => {
+  const rel = '原子写.md'
+  const abs = path.join(ROOT, rel)
+  const body = '第一行\n第二行\n'.repeat(50)
+  const r = runTool(ROOT, 'write_file', { path: rel, content: body }, true)
+  assert.equal(r.isError, false)
+  assert.equal(fs.readFileSync(abs, 'utf8'), body)
+  const left = fs.readdirSync(ROOT).filter((n) => n.startsWith('.sec-write-'))
+  assert.equal(left.length, 0, '不该留下临时文件：' + left.join(','))
+  fs.rmSync(abs, { force: true })
+})
+
+/* ---------------- 1.5.4：更新检查的版本比较 ---------------- */
+
+test('cmpVersion：x.y.z 三段数字比大小', () => {
+  assert.equal(cmpVersion('1.5.4', '1.5.3'), 1, '新版 > 旧版')
+  assert.equal(cmpVersion('1.5.3', '1.5.4'), -1, '旧版 < 新版')
+  assert.equal(cmpVersion('1.5.4', '1.5.4'), 0, '一样就是 0')
+  assert.equal(cmpVersion('1.6.0', '1.5.99'), 1, '次版本优先')
+  assert.equal(cmpVersion('2.0.0', '1.99.99'), 1, '主版本优先')
+  assert.equal(cmpVersion('1.5.4-beta.1', '1.5.3'), 1, '预发布后缀不参与比较')
+  assert.equal(cmpVersion('1.5.10', '1.5.9'), 1, '按数字比，不是按字符串比')
+  assert.equal(cmpVersion('', '1.5.4'), -1, '空版本当 0.0.0')
 })
 
 /* ---------------- 黑名单 ---------------- */

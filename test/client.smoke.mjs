@@ -175,7 +175,7 @@ for (const [label, value] of cases) {
     assert(fill.props.style.width === '51.11%', '细线宽度不对：' + fill.props.style.width + '（应为 23000/45000）')
     assert(fill.props.style.background !== '#f59e0b', '还没到点就变琥珀了')
     assert(text.indexOf('字幕最后一行在这里') >= 0, '字幕没露出来')
-    assert(text.indexOf('让我拆一下') >= 0, '碎碎念（思考中的那句）没画出来')
+    assert(text.indexOf('帮你理一理') >= 0, '碎碎念（思考中的那句）没画出来')
   }
   if (label === '评审中 到点') {
     const fill = barOf(el)
